@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Victoria Harbour Digital Twin Air Corridor</title>
+    <!-- Third-party libraries (local copies in vendor/, see README for versions and licences) -->
+    <link rel="stylesheet" href="vendor/maplibre-gl.css">
+    <link rel="stylesheet" href="vendor/leaflet.css">
+    <script src="vendor/maplibre-gl.js"></script>
+    <script src="vendor/deck.gl.min.js"></script>
+    <script src="vendor/leaflet.js"></script>
+    <!-- Project styles -->
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+
+<div id="map"></div>
+
+<!-- Control Panel: compact, tabbed, collapsible -->
+<div id="panel">
+  <div class="p-head">
+    <div class="p-title" title="Victoria Harbour digital-twin air corridor · hypothetical study">VH Air Corridor</div>
+    <button class="icon-btn" id="btnLegend" onclick="toggleLegend()" title="Legend: what the colours and symbols mean" style="width:auto;padding:0 7px;font-size:11px">Key</button>
+    <button class="icon-btn" onclick="openGuide()" title="Help &amp; documentation">?</button>
+    <button class="icon-btn" id="btnCollapse" onclick="togglePanel()" title="Hide / show the control panel">‹</button>
+  </div>
+  <div class="p-body">
+    <div class="tabs">
+      <button class="tab on" data-tab="map" onclick="showTab('map')">Map</button>
+      <button class="tab" data-tab="sim" onclick="showTab('sim')">Simulate</button>
+      <button class="tab" data-tab="ana" onclick="showTab('ana')">Analyse</button>
+      <button class="tab" data-tab="fleet" onclick="showTab('fleet')">Fleet</button>
+    </div>
+
+    <div class="pane on" data-pane="map">
+      <div class="grid2">
+        <button class="tgl" id="btnVertiport" onclick="toggleVertiports()" title="7 ferry piers (UAV pads) and 3 helipads (reference only)"><i></i>Piers</button>
+        <button class="tgl" id="btnWaypoint" onclick="toggleWaypoints()" title="Corridor network: piers, access fixes and the links UAVs may fly"><i></i>Network</button>
+        <button class="tgl" id="btnCorridor" onclick="setView(M3.on ? '2d' : 'map3d')" title="Open the 3D map: A / B cruise layers and the reserved E layer at altitude (same as the 3D map switch)"><i></i>3D layers</button>
+        <button class="tgl" id="btnNFZ" onclick="toggleNoFlyZones()" title="Real Cap 448G restricted flying zones (CAD eSUA map), for reference only — the study assumes no restrictions; real operations need CAD approval"><i></i>RFZ</button>
+        <button class="tgl" id="btnWind" onclick="toggleWind()" title="Live wind from 4 HKO harbour stations, converted to the 60 / 90 / 110 m layers"><i></i>Wind</button>
+        <button class="tgl" id="btnHKO" onclick="toggleHKO()" title="Live HKO temperatures, humidity and warnings (display only)"><i></i>Weather</button>
+      </div>
+    </div>
+
+    <div class="pane" data-pane="sim">
+      <label class="lbl">Origin → destination</label>
+      <div class="row">
+        <select id="routeFrom" class="sel" title="Origin pier"></select>
+        <span class="arrow">→</span>
+        <select id="routeTo" class="sel" title="Destination pier"></select>
+      </div>
+      <button class="btn primary" id="btnDrone" onclick="toggleDrones()" title="Start / stop live traffic for the selected origin → destination filter">▶ Start traffic</button>
+      <button class="btn" id="btnAnimate" onclick="startAnimation()" title="Plan one route with A* for the selected piers and explain why it is chosen">Plan one route (A*)</button>
+      <label class="lbl">Emergency</label>
+      <div class="row">
+        <select id="emgScenario" class="sel" title="Emergency threshold to inject — definitions in Help › Emergency thresholds">
+          <option value="battery">Battery ≤ 25 %</option>
+          <option value="motor">Motor &lt; 65 %</option>
+          <option value="c2">C2 lost ≥ 10 s</option>
+          <option value="gust">Gust &gt; 20 m/s</option>
+        </select>
+        <button class="btn danger" id="btnEmg" onclick="triggerEmergency()" title="Apply the selected threshold to a cruising UAV and watch its diversion">Inject</button>
+      </div>
+    </div>
+
+    <div class="pane" data-pane="ana">
+      <button class="btn" onclick="showCrossings()" title="Crossings and alternative networks over the 24 cross-harbour OD pairs">Network check</button>
+      <button class="btn" onclick="showBatch()" title="300 Poisson flights at 2, 4 and 6 flights/min, with and without strategic 4D slots (seed 2026)">Batch evaluation</button>
+      <button class="btn" onclick="compareCostModels()" title="Physical cost vs weighted-sum cost in five wind / congestion scenarios">Cost-model comparison</button>
+      <button class="btn" onclick="showEmergency()" title="Emergency at the midpoint of every cruise leg of all 24 OD routes: divert via layer E vs continue">Emergency response test</button>
+    </div>
+
+    <div class="pane" data-pane="fleet">
+      <p class="muted" style="line-height:1.5;margin:0 0 8px">A fixed fleet based at the piers: UAVs stay where they land, recharge on the pad apron, and are repositioned empty when a pier runs out.</p>
+      <button class="btn primary" onclick="openFleet()" title="Open the full fleet model in a large panel">Open fleet model</button>
+    </div>
+
+    <div id="panelLog" class="closed">
+      <button class="log-head" onclick="this.parentNode.classList.toggle('closed')" title="Show / hide the status log"><span id="logLast">System ready</span><b>Log</b></button>
+      <div id="log">System ready</div>
+    </div>
+  </div>
+</div>
+
+<!-- 3D corridor model -->
+<div id="view3d">
+  <div id="v3dCanvas"></div>
+  <div class="v3d-key"><span><i style="background:#a78bfa"></i>B 110 m · 180–359°</span><span><i style="background:#22d3ee"></i>A 90 m · 000–179°</span><span><i style="background:#ef4444"></i>E 60 m · emergency</span><span><i style="background:#2dd4bf"></i>pier</span><span class="muted">heights ×12 · drag to rotate · right-drag to pan · scroll to zoom</span></div>
+</div>
+<div id="m3View">
+  <div id="m3Canvas"></div>
+  <div class="v3d-key m3-key"><span><i style="background:#a78bfa"></i>B 110 m</span><span><i style="background:#22d3ee"></i>A 90 m</span><span><i style="background:#ef4444"></i>E 60 m</span><span><i style="background:#2dd4bf"></i>pier</span>
+    <span class="muted">corridor heights</span><button class="chip on" id="m3x1" onclick="set3dMapExag(1)">true scale</button><button class="chip" id="m3x3" onclick="set3dMapExag(3)">×3</button><button class="chip" id="m3x10" onclick="set3dMapExag(10)">×10</button>
+    <span class="muted">· right-drag / ctrl-drag to tilt and rotate · needs internet for imagery and buildings</span></div>
+</div>
+<div id="viewSwitch" title="Switch between the 2D map and the 3D map">
+  <button id="vs2d" class="on" onclick="setView('2d')">2D map</button>
+  <button id="vsMap" onclick="setView('map3d')">3D map</button>
+</div>
+
+<!-- Fixed HUD strips -->
+<div id="hudWrap">
+    <div class="hud" id="hudWind"></div>
+    <div class="hud" id="hudTraffic"></div>
+</div>
+
+<!-- Legend -->
+<div id="legendPop">
+  <div class="lg-h">Map</div>
+  <div class="lg-row"><span class="sw dot" style="background:#2dd4bf"></span>Ferry pier = UAV pad (7)</div>
+  <div class="lg-row"><span class="sw dot" style="background:#f97316"></span>Helipad — manned helicopters, reference only</div>
+  <div class="lg-row"><span class="sw dot ring" style="background:#2dd4bf;border-color:#f97316"></span>Pier with a helipad on the same building</div>
+  <div class="lg-row"><span class="sw dot" style="background:#fcd34d;width:8px;height:8px"></span>Access / holding fix (AC-…)</div>
+  <div class="lg-row"><span class="sw line" style="background:#4ade80"></span>Cross-harbour link (along a ferry route)</div>
+  <div class="lg-row"><span class="sw line" style="background:#2dd4bf"></span>Coastal link</div>
+  <div class="lg-row"><span class="sw" style="background:rgba(231,76,60,0.35);border:1px solid #ff0000"></span>Restricted flying zone (Cap 448G) — reference only</div>
+  <div class="lg-row"><span class="sw dot" style="background:#facc15;width:8px;height:8px"></span>HKO anemometer / leg wind</div>
+  <div class="lg-h">Flight layers</div>
+  <div class="lg-row"><span class="sw line" style="background:#a78bfa"></span>B · 110 m · track 180–359°</div>
+  <div class="lg-row"><span class="sw line" style="background:#22d3ee"></span>A · 90 m · track 000–179°</div>
+  <div class="lg-row"><span class="sw line" style="background:#ef4444"></span>E · 60 m · emergency only</div>
+  <div class="lg-h">UAV phase (label tag)</div>
+  <div class="lg-grid">
+    <span><b class="ph" style="background:#64748b">wait</b>on pier</span><span><b class="ph" style="background:#93c5fd">climb</b>climbing</span>
+    <span><b class="ph" style="background:#22d3ee">A</b>cruise 90 m</span><span><b class="ph" style="background:#a78bfa">B</b>cruise 110 m</span>
+    <span><b class="ph" style="background:#4ade80">appr</b>final approach</span><span><b class="ph" style="background:#f472b6">hold</b>holding at fix</span>
+    <span><b class="ph" style="background:#4ade80">land</b>landing</span><span><b class="ph" style="background:#94a3b8">unload</b>unloading</span>
+    <span><b class="ph" style="background:#ef4444">EMG</b>emergency / layer E</span>
+  </div>
+</div>
+</div>
+
+<!-- Info Panel -->
+<div id="infoStack"></div>
+<input type="file" id="hkoFile" accept=".csv,text/csv" style="display:none" onchange="loadHKOFile(this)">
+
+<!-- Guide & definitions module -->
+<div id="fleetOverlay" class="guide-overlay" onclick="if (event.target === this) closeFleet()">
+  <div class="fleet-panel" role="dialog" aria-label="Fleet model">
+    <div class="fl-head"><h3>Fleet model</h3><span class="muted">fixed fleet based at the 7 piers · same corridor, wind, 4D booking and energy model as the twin</span>
+      <button class="close-btn" onclick="closeFleet()" title="Close (Esc)">×</button></div>
+    <div class="fl-body">
+      <div class="fl-side">
+        <div class="lbl">Fleet</div>
+        <label class="fl-f">UAVs per pier <input id="flN" type="number" min="1" max="8" value="2"></label>
+        <input id="flBat" type="hidden" value="950"><input id="flChg" type="hidden" value="1.5"><input id="flDur" type="hidden" value="120">
+        <div class="lbl">Demand</div>
+        <label class="fl-f">Orders per minute <input id="flRate" type="number" min="0.5" max="10" step="0.5" value="2"></label>
+        <div class="lbl">Rebalancing</div>
+        <label class="fl-f">Strategy <select id="flStrat"><option value="none">None</option><option value="reactive">Reactive</option><option value="proactive" selected>Proactive</option></select></label>
+        <label class="fl-f" title="Proactive only: UAVs with enough charge that each pier should keep ready on its apron">Target ready per pier <input id="flTgt" type="number" min="0" max="5" value="2"></label>
+        <p class="muted fl-fixed">Fixed assumptions: battery 950 Wh (same pack as the twin) · pad charging 1.5 kW (≈ 38 min to full) · 120 min run</p>
+        <details class="fl-adv"><summary>Advanced</summary>
+          <label class="fl-f" title="Same seed = the same orders every run, so fleet sizes and strategies are compared fairly. Change it to test a different batch of orders.">Random seed <input id="flSeed" type="number" value="2026"></label>
+        </details>
+        <button class="btn primary" onclick="runFleet()">Run fleet model</button>
+        <button class="btn" onclick="runFleetSweep()" title="Run 1–5 UAVs per pier with the same demand and seed">Fleet-size sweep (1–5 per pier)</button>
+        <p class="muted" style="line-height:1.45">Rules: an order waits at its origin pier until a UAV there has enough charge for the trip plus the 20 % reserve; it then books a conflict-free 4D slot as in the live twin. After landing and 30 s unloading the UAV stays at the destination and charges.<br><b>None</b> – UAVs only move with an order.<br><b>Reactive</b> – when a pier has waiting orders and no UAV is on the way, the nearest pier with a spare UAV sends one empty.<br><b>Proactive</b> – every pier keeps a target number of ready UAVs (enough charge for its longest trip + reserve): a pier below target is topped up from the nearest pier above target before orders pile up, and a UAV left surplus at a pier flies back to its home pier if home is short.</p>
+      </div>
+      <div class="fl-main" id="flOut"><p class="muted">Set the fleet and demand on the left, then run the model.</p></div>
+    </div>
+  </div>
+</div>
+
+<div id="guideOverlay" class="guide-overlay" onclick="if (event.target === this) closeGuide()">
+  <div class="guide" role="dialog" aria-label="Guide and definitions">
+    <div class="guide-head">
+      <button class="close-btn" onclick="closeGuide()" title="Close (Esc)">×</button>
+      <h3>Guide &amp; definitions</h3>
+      <p><b>What this module is:</b> the reference module of the digital twin. It holds every definition, threshold and parameter
+      used in the interface, so the main screen only carries controls and live values.<br>
+      <b>How to use it:</b> pick a topic on the left. On the main screen, hover over any button or any field of the bottom status bars
+      for a one-line definition, and click a status bar to open a card that explains the current numbers. Close this window with × or Esc.</p>
+    </div>
+    <div class="guide-main">
+      <div class="guide-nav" id="guideNav"></div>
+      <div class="guide-body" id="guideBody"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Data: official eSUA Drone Map restricted flying zones (288 polygons) -->
+<script src="data/rfz_data.js"></script>
+<!-- Application -->
+<script src="js/app.js"></script>
+</body>
+</html>
