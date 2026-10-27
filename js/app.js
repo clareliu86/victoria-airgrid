@@ -627,115 +627,10 @@ function corridorArrow(a, b, color, label) {
         html: `<div title="${label}" style="color:${color};font-size:14px;transform:rotate(${rot}deg);text-shadow:0 0 5px #020617">↑</div>`,
         iconSize: [14, 14], iconAnchor: [7, 7] }) });
 }
-// ---------- 3D corridor model (three.js) ----------
-const V3 = { scene: null, cam: null, ren: null, ctl: null, uav: {}, on: false, EX: 12 };
-function v3pos(latlng, z) { const [x, y] = toXY(latlng); return new THREE.Vector3(x, z * V3.EX, -y); }
-function v3label(text, color, size = 34) {
-    const c = document.createElement('canvas'), g = c.getContext('2d');
-    g.font = `600 ${size}px Inter, sans-serif`; const w = Math.ceil(g.measureText(text).width) + 16;
-    c.width = w; c.height = size + 14; g.font = `600 ${size}px Inter, sans-serif`;
-    g.fillStyle = 'rgba(2,6,23,0.55)'; g.fillRect(0, 0, w, c.height); g.fillStyle = color; g.fillText(text, 8, size);
-    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, transparent: true }));
-    sp.scale.set(w * 4.5, c.height * 4.5, 1); sp.renderOrder = 10; return sp;
-}
-function v3bar(a, b, r, color, opacity = 1) {
-    const d = new THREE.Vector3().subVectors(b, a), len = d.length();
-    const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 8, 1, true),
-        new THREE.MeshBasicMaterial({ color, transparent: opacity < 1, opacity }));
-    m.position.copy(a).addScaledVector(d, 0.5);
-    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize());
-    return m;
-}
-function v3arrow(a, b, color) {
-    const d = new THREE.Vector3().subVectors(b, a), m = new THREE.Mesh(new THREE.ConeGeometry(38, 110, 10), new THREE.MeshBasicMaterial({ color }));
-    m.position.copy(a).addScaledVector(d, 0.6); m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize()); return m;
-}
-function build3d() {
-    const host = document.getElementById('v3dCanvas');
-    const scene = new THREE.Scene(); scene.background = new THREE.Color(0x0b1120);
-    const cam = new THREE.PerspectiveCamera(42, host.clientWidth / host.clientHeight, 10, 60000);
-    const ren = new THREE.WebGLRenderer({ antialias: true }); ren.setPixelRatio(window.devicePixelRatio || 1);
-    ren.setSize(host.clientWidth, host.clientHeight); host.appendChild(ren.domElement);
-    // extent of the network
-    const pts = Object.keys(WP).map(k => toXY(WP[k])), xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
-    const x0 = Math.min(...xs) - 400, x1 = Math.max(...xs) + 400, y0 = Math.min(...ys) - 400, y1 = Math.max(...ys) + 400;
-    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, W = x1 - x0, H = y1 - y0;
-    // water and a faint grid
-    const water = new THREE.Mesh(new THREE.PlaneGeometry(W + 3000, H + 3000), new THREE.MeshBasicMaterial({ color: 0x0c2a3f }));
-    water.rotation.x = -Math.PI / 2; water.position.set(cx, 0, -cy); scene.add(water);
-    const grid = new THREE.GridHelper(Math.max(W, H) + 3000, 30, 0x1e3a5f, 0x16304d); grid.position.set(cx, 1, -cy); scene.add(grid);
-    // layer sheets
-    [[LEVEL_ALT[2], 0xa78bfa, 'B · 110 m · track 180–359°'], [LEVEL_ALT[1], 0x22d3ee, 'A · 90 m · track 000–179°'], [LEVEL_ALT[LEVEL_E], 0xef4444, 'E · 60 m · emergency only']].forEach(([z, col, txt]) => {
-        const sheet = new THREE.Mesh(new THREE.PlaneGeometry(W, H), new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.05, side: THREE.DoubleSide, depthWrite: false }));
-        sheet.rotation.x = -Math.PI / 2; sheet.position.set(cx, z * V3.EX, -cy); scene.add(sheet);
-        const edge = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(W, H)), new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.45 }));
-        edge.rotation.x = -Math.PI / 2; edge.position.copy(sheet.position); scene.add(edge);
-        const lb = v3label(txt, '#' + col.toString(16).padStart(6, '0'), 30); lb.position.set(x1 - 1100, z * V3.EX + 60, -y0); scene.add(lb);
-    });
-    // directional cruise links on A / B, reserved E links
-    GRAPH_EDGES.forEach(([u, v]) => {
-        [[u, v], [v, u]].forEach(([a, b]) => {
-            const lvl = levelOfTrack(WP[a], WP[b]), z = LEVEL_ALT[lvl], col = lvl === 1 ? 0x22d3ee : 0xa78bfa;
-            const pa = v3pos(WP[a], z), pb = v3pos(WP[b], z);
-            scene.add(v3bar(pa, pb, 9, col, 0.9)); if (distMetres(WP[a], WP[b]) > 300) scene.add(v3arrow(pa, pb, col));
-        });
-        scene.add(v3bar(v3pos(WP[u], LEVEL_ALT[LEVEL_E]), v3pos(WP[v], LEVEL_ALT[LEVEL_E]), 6, 0xef4444, 0.6));
-    });
-    // fixes: vertical connector between layers; piers: pad + climb / descent column
-    Object.keys(WP).forEach(id => {
-        if (id.startsWith('AC-')) {
-            scene.add(v3bar(v3pos(WP[id], LEVEL_ALT[LEVEL_E]), v3pos(WP[id], LEVEL_ALT[2]), 5, 0xfcd34d, 0.55));
-            [LEVEL_ALT[1], LEVEL_ALT[2]].forEach(z => { const s = new THREE.Mesh(new THREE.SphereGeometry(40, 12, 8), new THREE.MeshBasicMaterial({ color: 0xfcd34d })); s.position.copy(v3pos(WP[id], z)); scene.add(s); });
-        }
-    });
-    Object.entries(PIERS).forEach(([id, p]) => {
-        const pad = new THREE.Mesh(new THREE.CylinderGeometry(70, 70, 24, 24), new THREE.MeshBasicMaterial({ color: 0x2dd4bf }));
-        pad.position.copy(v3pos(p.pos, 0)).add(new THREE.Vector3(0, 12, 0)); scene.add(pad);
-        scene.add(v3bar(v3pos(p.pos, 0), v3pos(p.pos, LEVEL_ALT[2]), 6, 0xe2e8f0, 0.35));
-        const lb = v3label(p.short, '#2dd4bf', 30); lb.position.copy(v3pos(p.pos, 0)).add(new THREE.Vector3(0, -120, 0)); scene.add(lb);
-    });
-    const ctl = new THREE.OrbitControls(cam, ren.domElement); ctl.maxPolarAngle = Math.PI * 0.49;
-    Object.assign(V3, { scene, cam, ren, ctl, fit: { cx, cy, W, H } });
-    fit3d();
-    new ResizeObserver(() => { const w = host.clientWidth, h = host.clientHeight; if (!w || !h) return; ren.setSize(w, h); cam.aspect = w / h; cam.updateProjectionMatrix(); if (V3.fit) fit3d(); }).observe(host);
-}
-// frame the whole network: seen from the south at ~35° elevation, distance from the horizontal field of view
-function fit3d() {
-    const { cx, cy, W, H } = V3.fit, cam = V3.cam;
-    const vf = cam.fov * Math.PI / 180, hf = 2 * Math.atan(Math.tan(vf / 2) * cam.aspect);
-    const dist = Math.max((W / 2) / Math.tan(hf / 2), (H * 0.8) / Math.tan(vf / 2)) * 1.2, el = 42 * Math.PI / 180;
-    V3.ctl.target.set(cx, LEVEL_ALT[1] * V3.EX * 0.5, -cy);
-    cam.position.set(cx, V3.ctl.target.y + dist * Math.sin(el), -cy + dist * Math.cos(el));
-    V3.ctl.update();
-}
-function loop3d() {
-    if (!V3.on) return;
-    requestAnimationFrame(loop3d);
-    const seen = new Set();
-    activeDrones.forEach(d => {
-        let m = V3.uav[d.id];
-        if (!m) { m = new THREE.Mesh(new THREE.SphereGeometry(80, 14, 10), new THREE.MeshBasicMaterial({ color: 0xffffff })); V3.scene.add(m); V3.uav[d.id] = m; }
-        const pos = (d.state === 'landing' || d.state === 'landed') ? d.coords[d.coords.length - 1] : (d.state === 'ground' ? d.coords[0] : dronePos(d));
-        m.position.copy(v3pos(pos, droneAltitude(d)));
-        m.material.color.set(PHASE_COL[uavPhase(d).tag] || '#ffffff');
-        m.scale.setScalar(boardFocus === d.id ? 1.8 : 1);
-        seen.add(d.id);
-    });
-    Object.keys(V3.uav).forEach(id => { if (!seen.has(id)) { V3.scene.remove(V3.uav[id]); delete V3.uav[id]; } });
-    V3.ctl.update(); V3.ren.render(V3.scene, V3.cam);
-}
-function open3d() {
-    document.getElementById('view3d').classList.add('open');
-    if (typeof M3 !== 'undefined' && M3.on) close3dMap();
-    try { if (typeof THREE === 'undefined') throw new Error('3D model removed'); if (!V3.scene) build3d(); } catch (e) { close3d(); addLog('3D view not available in this browser (WebGL) — showing the 2D layer view', 'err'); return false; }
-    V3.on = true; loop3d(); return true;
-}
-function close3d() { V3.on = false; document.getElementById('view3d').classList.remove('open'); }
+// ---------- View switch: 2D map | 3D map ----------
 function setView(mode) {
     if (mode === '3d') mode = 'map3d';
-    if (corridorOn) toggleCorridorLayers();
     if (mode !== 'map3d' && M3.on) close3dMap();
-    if (mode === '3d' && !corridorOn) toggleCorridorLayers();
     if (mode === 'map3d' && !M3.on) open3dMap();
     syncViewSwitch();
 }
@@ -819,7 +714,6 @@ function loop3dMap() {
 }
 function open3dMap() {
     if (typeof maplibregl === 'undefined' || typeof deck === 'undefined') { addLog('3D map libraries not available', 'err'); return false; }
-    if (corridorOn) toggleCorridorLayers();
     document.getElementById('m3View').classList.add('open');
     try { if (!M3.map) build3dMap(); else M3.map.resize(); }
     catch (e) { document.getElementById('m3View').classList.remove('open'); addLog('3D map not available in this browser (WebGL): ' + e.message, 'err'); return false; }
@@ -832,27 +726,6 @@ function set3dMapExag(x) {
     M3.ex = x; document.getElementById('m3x1').classList.toggle('on', x === 1); document.getElementById('m3x3').classList.toggle('on', x === 3); document.getElementById('m3x10').classList.toggle('on', x === 10);
     M3.staticLayers = m3Static(); if (M3.overlay) M3.overlay.setProps({ layers: [...M3.staticLayers, ...m3Uavs()] });
 }
-function toggleCorridorLayers() {
-    corridorOn = !corridorOn; toggleBtn('btnCorridor', corridorOn);
-    if (!corridorOn) { corridorLayer.clearLayers(); map.removeLayer(corridorLayer); closeCard('layers'); close3d(); syncViewSwitch(); return; }
-    if (open3d()) { syncViewSwitch(); addLog('3D view: layers A 90 m / B 110 m / E 60 m (heights ×12) — switch back with "2D map"', 'ok'); return; }
-    syncViewSwitch();
-    corridorLayer.clearLayers();
-    GRAPH_EDGES.forEach(([u, v]) => {
-        [[u, v, -10], [v, u, 10]].forEach(([a, b, off]) => {
-            const lvl = levelOfTrack(WP[a], WP[b]), color = lvl === 1 ? '#22d3ee' : '#a78bfa';
-            const p = offsetSegment(WP[a], WP[b], off);
-            corridorLayer.addLayer(L.polyline(p, { color, weight: 3, opacity: 0.78 })
-                .bindPopup(`<b>${a} → ${b}</b><br>${LEVEL_NAME[lvl]}<br>One-way cruise flow`));
-            corridorLayer.addLayer(corridorArrow(p[0], p[1], color, `${a} → ${b}`));
-        });
-        corridorLayer.addLayer(L.polyline([WP[u], WP[v]], { color: '#ef4444', weight: 2, opacity: 0.65, dashArray: '4 7' })
-            .bindPopup(`<b>${u} ↔ ${v}</b><br>${LEVEL_NAME[LEVEL_E]}<br>Reserved; bidirectional with 4D slots`));
-    });
-    corridorLayer.addTo(map);
-    addLog('Three-layer corridor shown: A/B directional cruise + reserved E layer (definitions: Guide › Three-layer corridor)', 'ok');
-}
-
 function siteLabel(pos, html, color, below) {
     return L.marker(pos, { interactive: false, icon: L.divIcon({ className: 'drone-icon',
         html: `<div class="map-label lbl-site" style="color:${color}">${html}</div>`, iconSize: [200, 16], iconAnchor: [100, below ? -10 : 24] }) });

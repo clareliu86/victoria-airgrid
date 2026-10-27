@@ -13,7 +13,7 @@ This is the source code of the web demo for the capstone project *Digital Twin A
 ```
 index.html            page markup: panel, tabs, cards, overlays
 css/style.css         project styles
-js/app.js             all project logic (≈ 2,500 lines, see module map)
+js/app.js             all project logic (≈ 2,400 lines, see module map)
 data/rfz_data.js      official eSUA Drone Map restricted flying zones, 288 polygons (advisory only)
 vendor/               third-party libraries, unmodified
   leaflet.js / .css        Leaflet 1.9.4 (BSD-2-Clause): 2D map
@@ -33,19 +33,19 @@ vendor/               third-party libraries, unmodified
 | 311 | 6. Wind field | HKO `latest_10min_wind.csv` → power-law height correction → IDW (1/d²) on u/v → wake factor; Open-Meteo and offline snapshot fallbacks |
 | 523 | 7. Physical cost and A* | Edge cost = d / v_ground + junction queue W_q; A* search |
 | 611 | 8. Layers | Direction-based layers: A 90 m (000–179°), B 110 m (180–359°), E 60 m (emergency) |
-| 630 | 3D corridor model | Legacy three.js view, no longer used (three.js removed) |
-| 749 | Real 3D map | MapLibre + deck.gl: corridors at true altitude, ×1 / ×3 / ×10 heights |
-| 943 | 9. Traffic simulation | Sim clock, strategic 4D booking (junction slots, pad window, trajectory probe, vertical take-off/landing column), tactical separation |
-| 1440 | 9b. Emergency layer | Diversion via layer E, low-battery handling |
-| 1651 | 10. Single-route planning | "Plan one route (A*)" and the route explanation card |
-| 1694 | 11–12. Site data / wind card | Wind explanation card |
-| 1799 | 13. Batch evaluation | Headless, reproducible conflict evaluation |
-| 1800 | Fixed-fleet model | `fleetSim`: fixed fleet, charging, rebalancing (None / Reactive / Proactive), pier view, fleet-size sweep |
-| 2117 | 14. Routing cost model | Distance-only vs physical-time cost comparison |
-| 2187 | Guide & definitions | Help document, "?" explanations, live explanation cards |
-| 2275 | Flight board | Status-bar numbers traced to individual UAVs, phase tags |
-| 2434 | 15. HKO weather | Live temperature, humidity and warnings |
-| 2496 | 16. Start-up | Initial rendering |
+| 630 | View switch | 2D map / 3D map switch |
+| 644 | Real 3D map | MapLibre + deck.gl: corridors at true altitude, ×1 / ×3 / ×10 heights |
+| 816 | 9. Traffic simulation | Sim clock, strategic 4D booking (junction slots, pad window, trajectory probe, vertical take-off/landing column), tactical separation |
+| 1313 | 9b. Emergency layer | Diversion via layer E, low-battery handling |
+| 1524 | 10. Single-route planning | "Plan one route (A*)" and the route explanation card |
+| 1567 | 11–12. Site data / wind card | Wind explanation card |
+| 1672 | 13. Batch evaluation | Headless, reproducible conflict evaluation |
+| 1673 | Fixed-fleet model | `fleetSim`: fixed fleet, charging, rebalancing (None / Reactive / Proactive), pier view, fleet-size sweep |
+| 1990 | 14. Routing cost model | Distance-only vs physical-time cost comparison |
+| 2060 | Guide & definitions | Help document, "?" explanations, live explanation cards |
+| 2148 | Flight board | Status-bar numbers traced to individual UAVs, phase tags |
+| 2307 | 15. HKO weather | Live temperature, humidity and warnings |
+| 2369 | 16. Start-up | Initial rendering |
 
 Line numbers are approximate and will shift as the code is edited.
 
