@@ -6,7 +6,7 @@ This is the source code of the web demo for the capstone project *Digital Twin A
 
 - Open `index.html` in Chrome or Edge. No build step and no server are needed.
 - Internet is needed only for live data and imagery: HKO wind and weather, Open-Meteo, satellite tiles and 3D buildings. Without it the demo falls back to an offline wind snapshot.
-- The single-file version (`VH_Digital_Twin_Air_Corridor_14_3Dmap.html`) has everything inlined, so it can be sent as one file.
+- To create a single-file version of the current site for sharing or offline use, run `node scripts/build-standalone.cjs /absolute/path/output.html`. The map imagery and live weather still need network access.
 
 ## File structure
 
