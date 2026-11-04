@@ -59,7 +59,7 @@ Line numbers are approximate and will shift as the code is edited.
 | `UNLOAD_S` | 30 s | Time on the pad after touchdown |
 | `DEP_PAD_MODE` | `'vertical'` | Take-off climb and landing descent at the same pier are separated in time |
 | `EMG_RETRY_S` | 5 s | Re-check interval when no emergency diversion is feasible yet |
-| Fleet model | 1.5 kW charging, 120 min, seed 2026, 20 % reserve | Fixed assumptions of the fleet panel |
+| Fleet model | Matrice 4E 100 W hub profile: 60 min to 90 %, 78 min to full; 120 min, seed 2026, 20 % reserve | Fixed assumptions of the fleet panel; charging time is calibrated independently of the existing 950 Wh flight-energy scale |
 
 ## External data sources
 

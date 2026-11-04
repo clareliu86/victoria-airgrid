@@ -73,7 +73,7 @@
     </div>
 
     <div class="pane" data-pane="fleet">
-      <p class="muted" style="line-height:1.5;margin:0 0 8px">A fixed fleet based at the piers: UAVs stay where they land, recharge on the pad apron, and are repositioned empty when a pier runs out.</p>
+      <p class="muted" style="line-height:1.5;margin:0 0 8px">A fixed fleet based at the piers: UAVs stay where they land, their batteries follow the DJI Matrice 4E 100 W charging-hub profile, and aircraft are repositioned empty when a pier runs out.</p>
       <button class="btn primary" onclick="openFleet()" title="Open the full fleet model in a large panel">Open fleet model</button>
     </div>
 
@@ -141,19 +141,19 @@
       <div class="fl-side">
         <div class="lbl">Fleet</div>
         <label class="fl-f">UAVs per pier <input id="flN" type="number" min="1" max="8" value="2"></label>
-        <input id="flBat" type="hidden" value="950"><input id="flChg" type="hidden" value="1.5"><input id="flDur" type="hidden" value="120">
+        <input id="flBat" type="hidden" value="950"><input id="flChg" type="hidden" value="0.1"><input id="flChg90" type="hidden" value="60"><input id="flChgFull" type="hidden" value="78"><input id="flDur" type="hidden" value="120">
         <div class="lbl">Demand</div>
         <label class="fl-f">Orders per minute <input id="flRate" type="number" min="0.5" max="10" step="0.5" value="2"></label>
         <div class="lbl">Rebalancing</div>
         <label class="fl-f">Strategy <select id="flStrat"><option value="none">None</option><option value="reactive">Reactive</option><option value="proactive" selected>Proactive</option></select></label>
         <label class="fl-f" title="Proactive only: UAVs with enough charge that each pier should keep ready on its apron">Target ready per pier <input id="flTgt" type="number" min="0" max="5" value="2"></label>
-        <p class="muted fl-fixed">Fixed assumptions: battery 950 Wh (same pack as the twin) · pad charging 1.5 kW (≈ 38 min to full) · 120 min run</p>
+        <p class="muted fl-fixed">Fixed assumptions: battery 950 Wh (existing flight-energy scale) · DJI Matrice 4E charging hub 100 W · ≈ 60 min to 90 % · ≈ 78 min to full · 120 min run</p>
         <details class="fl-adv"><summary>Advanced</summary>
           <label class="fl-f" title="Same seed = the same orders every run, so fleet sizes and strategies are compared fairly. Change it to test a different batch of orders.">Random seed <input id="flSeed" type="number" value="2026"></label>
         </details>
         <button class="btn primary" onclick="runFleet()">Run fleet model</button>
         <button class="btn" onclick="runFleetSweep()" title="Run 1–5 UAVs per pier with the same demand and seed">Fleet-size sweep (1–5 per pier)</button>
-        <p class="muted" style="line-height:1.45">Rules: an order waits at its origin pier until a UAV there has enough charge for the trip plus the 20 % reserve; it then books a conflict-free 4D slot as in the live twin. After landing and 30 s unloading the UAV stays at the destination and charges.<br><b>None</b> – UAVs only move with an order.<br><b>Reactive</b> – when a pier has waiting orders and no UAV is on the way, the nearest pier with a spare UAV sends one empty.<br><b>Proactive</b> – every pier keeps a target number of ready UAVs (enough charge for its longest trip + reserve): a pier below target is topped up from the nearest pier above target before orders pile up, and a UAV left surplus at a pier flies back to its home pier if home is short.</p>
+        <p class="muted" style="line-height:1.45">Rules: an order waits at its origin pier until a UAV there has enough charge for the trip plus the 20 % reserve; it then books a conflict-free 4D slot as in the live twin. After landing and 30 s unloading, the aircraft stays at the destination while its battery follows the 100 W charging-hub profile (0–90 % in about 60 min, 90–100 % in a further 18 min).<br><b>None</b> – UAVs only move with an order.<br><b>Reactive</b> – when a pier has waiting orders and no UAV is on the way, the nearest pier with a spare UAV sends one empty.<br><b>Proactive</b> – every pier keeps a target number of ready UAVs (enough charge for its longest trip + reserve): a pier below target is topped up from the nearest pier above target before orders pile up, and a UAV left surplus at a pier flies back to its home pier if home is short.</p>
       </div>
       <div class="fl-main" id="flOut"><p class="muted">Set the fleet and demand on the left, then run the model.</p></div>
     </div>

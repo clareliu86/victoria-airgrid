@@ -1678,7 +1678,7 @@ function closeFleet() { document.getElementById('fleetOverlay').classList.remove
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeFleet(); });
 function fleetParams() {
     const v = id => parseFloat(document.getElementById(id).value);
-    return { n: Math.max(1, Math.round(v('flN'))), bat: v('flBat'), chg: v('flChg'), rate: v('flRate'), dur: v('flDur'), seed: Math.round(v('flSeed')), strat: document.getElementById('flStrat').value, tgt: Math.max(0, Math.round(v('flTgt'))) };
+    return { n: Math.max(1, Math.round(v('flN'))), bat: v('flBat'), chg: v('flChg'), charge90Min: v('flChg90'), chargeFullMin: v('flChgFull'), rate: v('flRate'), dur: v('flDur'), seed: Math.round(v('flSeed')), strat: document.getElementById('flStrat').value, tgt: Math.max(0, Math.round(v('flTgt'))) };
 }
 function fleetSim(P) {
     const rng = mulberry32(P.seed), piers = Object.keys(PIERS), RESERVE = 0.2, dt = 5, T = P.dur * 60;
@@ -1707,7 +1707,16 @@ function fleetSim(P) {
             if (u.state === 'booked' && t >= u.tDep) { u.state = 'flying'; u.wh -= u.planE; u.used += u.planE; }
             if (u.state === 'flying' && t >= u.tFree) { u.state = 'idle'; u.at = u.to; }
             if (u.state === 'flying') u.tFly += dt;
-            else if (u.wh < P.bat - 1e-6) { const add = Math.min(P.bat - u.wh, P.chg * 1000 * dt / 3600); u.wh += add; u.chgNow = true; u.tChg += dt; if (!u.wasCharging) { u.charges++; u.wasCharging = true; } }
+            else if (u.wh < P.bat - 1e-6) {
+                // DJI Matrice 4E standard 100 W hub profile: about 60 min to 90 %, 78 min to full.
+                // Charge time is calibrated independently of the twin's existing flight-energy scale.
+                const soc = u.wh / P.bat;
+                const fracPerSecond = soc < 0.9
+                    ? 0.9 / (P.charge90Min * 60)
+                    : 0.1 / ((P.chargeFullMin - P.charge90Min) * 60);
+                const add = Math.min(P.bat - u.wh, P.bat * fracPerSecond * dt);
+                u.wh += add; u.chgNow = true; u.tChg += dt; if (!u.wasCharging) { u.charges++; u.wasCharging = true; }
+            }
             else { u.tIdle += dt; u.wasCharging = false; }
             if (u.state === 'flying') u.wasCharging = false;
         });
@@ -1779,7 +1788,7 @@ function fleetPierView(min) {
     const ids = r.uavs.map(u => u.id);
     const row = (u, i) => {
         const pct = 100 * u.wh / P.bat;
-        const st = u.st === 'booked' ? `<span style="color:#fbbf24">booked → ${PIERS[u.to].short}</span>` : u.chg ? `<span style="color:#4ade80">⚡ ${P.chg} kW</span>` : '<span class="muted">full</span>';
+        const st = u.st === 'booked' ? `<span style="color:#fbbf24">booked → ${PIERS[u.to].short}</span>` : u.chg ? `<span style="color:#4ade80">⚡ ${(P.chg * 1000).toFixed(0)} W hub</span>` : '<span class="muted">full</span>';
         return `<tr><td>${ids[i]}</td><td style="white-space:nowrap">${batBar(pct)}</td><td>${u.wh.toFixed(0)} / ${P.bat} Wh</td><td>${st}</td></tr>`; };
     const cards = piers.map((p, k) => {
         const here = S.u.map((u, i) => [u, i]).filter(([u]) => u.st !== 'flying' && u.at === p);
@@ -1830,7 +1839,7 @@ function runFleet() {
           <h4>Over time</h4>${fleetChart(r.series)}
           <h4>By pier</h4><table class="tbl"><tr><th>Pier</th><th>Orders</th><th>Served</th><th>Still waiting</th><th>Mean wait min</th><th>UAVs here at end</th></tr>${pierRows}</table>
           <h4>By UAV</h4><table class="tbl"><tr><th>UAV</th><th>Home</th><th>Now at</th><th>Deliveries</th><th>Empty flights</th><th>kWh used</th><th>Charge at end</th><th>Flying</th><th>Charging</th></tr>${uavRows}</table>
-          <p class="muted">${P.n} UAVs per pier · rebalancing ${P.strat}${P.strat === 'proactive' ? ' (target ' + P.tgt + ' ready / pier)' : ''} · ${P.rate} orders/min over the 24 cross-harbour pairs · ${T} min · battery ${P.bat} Wh, charging ${P.chg} kW · seed ${P.seed} · current wind field · 4D booking and take-off column rule as in the live twin.</p>`;
+          <p class="muted">${P.n} UAVs per pier · rebalancing ${P.strat}${P.strat === 'proactive' ? ' (target ' + P.tgt + ' ready / pier)' : ''} · ${P.rate} orders/min over the 24 cross-harbour pairs · ${T} min · battery ${P.bat} Wh · Matrice 4E ${(P.chg * 1000).toFixed(0)} W hub profile (${P.charge90Min} min to 90 %, ${P.chargeFullMin} min to full) · seed ${P.seed} · current wind field · 4D booking and take-off column rule as in the live twin.</p>`;
         fleetPierView(r.snaps.length - 1);
         addLog(`Fleet model: ${r.served.length}/${r.orders.length} orders served, mean wait ${(r.meanWait / 60).toFixed(1)} min`, 'ok');
     }, 30);
@@ -1848,7 +1857,7 @@ function runFleetSweep() {
         }
         out.innerHTML = `<h4>Fleet-size sweep · three rebalancing strategies</h4><table class="tbl"><tr><th rowspan="2">UAVs / pier</th><th rowspan="2">Fleet</th><th colspan="3">None</th><th colspan="3">Reactive</th><th colspan="3">Proactive (target ${base.tgt})</th></tr>
             <tr>${S.map(() => '<th class="fl-sw">Served</th><th>Wait min</th><th>Empty</th>').join('')}</tr>${rows.join('')}</table>
-            <p class="muted">Served = orders that took off within ${base.dur} min (green = best of the three). Wait = mean time from order to take-off, including the 4D slot delay. Empty = repositioning flights without cargo — the price paid for the shorter wait. ${base.rate} orders/min · battery ${base.bat} Wh · charging ${base.chg} kW · seed ${base.seed}.</p>`;
+            <p class="muted">Served = orders that took off within ${base.dur} min (green = best of the three). Wait = mean time from order to take-off, including the 4D slot delay. Empty = repositioning flights without cargo — the price paid for the shorter wait. ${base.rate} orders/min · battery ${base.bat} Wh · Matrice 4E ${(base.chg * 1000).toFixed(0)} W hub profile (${base.charge90Min} min to 90 %, ${base.chargeFullMin} min to full) · seed ${base.seed}.</p>`;
         addLog('Fleet-size sweep complete', 'ok');
     }, 30);
 }
