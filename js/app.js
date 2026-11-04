@@ -313,8 +313,9 @@ const rfzCrossings = (u, v) => EDGE_RFZ[edgeKey(u, v)] || [];
 // Leg wind = inverse-distance-weighted vector mean of the stations at the leg's level,
 // then × building-wake factor K. Gust factor decays with height.
 const UAV = {
-    mass: 15, v_air: 15, v_climb: 3, v_descent: 2, rotorArea: 0.985, FM: 0.70, CdA: 0.10,
-    battery_Wh: 950, reserve: 0.20, maxWind: 12, maxGust: 20,
+    model: 'DJI Matrice 4E', mass: 1.219, maxTakeoffKg: 1.420, maxPayloadKg: 0.200, payloadKg: 0.100,
+    v_air: 15, v_climb: 3, v_descent: 2, battery_Wh: 99.5,
+    reserve: 0.20, maxWind: 12, maxGust: 20,
 };
 // Three-layer corridor: two normal layers split by track (ICAO semicircular rule) + one reserved emergency layer
 const LEVEL_ALT = { 1: 90, 2: 110, 3: 60 };
@@ -521,13 +522,29 @@ function finishWind(sts, silent) {
 }
 
 // ---------- 7. Physical cost and A* ----------
-function powerModel(z = 100) {
+function powerModel(z = 100, payloadKg = UAV.payloadKg) {
     const T = windModel.temp - 0.0065 * z;
     const rho = 1.225 * 288.15 / (T + 273.15);
-    const Wt = UAV.mass * 9.81;
-    const P_ind = Math.pow(Wt, 1.5) / Math.sqrt(2 * rho * UAV.rotorArea) / UAV.FM;
-    const P_par = 0.5 * rho * UAV.CdA * UAV.v_air ** 3;
-    return { rho, T, P_hover: P_ind, P_cruise: P_ind + P_par, P_climb: P_ind + Wt * UAV.v_climb };
+    // Research approximation calibrated to DJI's no-payload, no-wind endurance figures:
+    // hover 42 min, flight at 9 m/s 49 min, distance at 14 m/s 35 km, all using 99.5 Wh.
+    const P0 = UAV.battery_Wh * 60 / 42;
+    const P9 = UAV.battery_Wh * 60 / 49;
+    const P14 = UAV.battery_Wh * 3600 / (35000 / 14);
+    const c = ((P14 - P0) / 14 - (P9 - P0) / 9) / 5;
+    const b = (P9 - P0) / 9 - 9 * c;
+    const v = UAV.v_air;
+    const payload = Math.max(0, Math.min(UAV.maxPayloadKg, payloadKg));
+    // Assumed 75 W induced component: weight^(3/2), density^(-1/2).
+    // 0.03 m² drag area is an assumed density correction, not a DJI specification.
+    const inducedDelta = 75 * (Math.pow((UAV.mass + payload) / UAV.mass, 1.5) * Math.sqrt(1.225 / rho) - 1);
+    const dragCorrection = 0.5 * 0.03 * (rho - 1.225) * v ** 3;
+    const P_hover = P0 + inducedDelta;
+    return { rho, T, P_hover, P_cruise: P0 + b * v + c * v * v + inducedDelta + dragCorrection,
+             P_climb: P_hover + (UAV.mass + payload) * 9.81 * UAV.v_climb };
+}
+function routeEnergyWh(plan, payloadKg = UAV.payloadKg) {
+    const pm = powerModel(100, payloadKg);
+    return (pm.P_cruise * (plan.tFlight + plan.tQueue) + pm.P_climb * plan.tClimb + pm.P_hover * plan.tDesc) / 3600;
 }
 function edgeCost(u, v, counts = {}, lvl) {
     const p1 = WP[u], p2 = WP[v];
@@ -585,10 +602,10 @@ function routeMetrics(path, counts = {}, lvl) {
         d += ec.d; tFlight += ec.tFlight; tQueue += ec.wq;
         legs.push({ from: path[i], to: path[i + 1], ...ec });
     }
-    const pm = powerModel(100);
+    const pm = powerModel(100, UAV.payloadKg);
     const z0 = legs[0].z, z1 = legs[legs.length - 1].z;
     const tClimb = z0 / UAV.v_climb, tDesc = z1 / UAV.v_descent;
-    const E_Wh = (pm.P_cruise * (tFlight + tQueue) + pm.P_climb * tClimb + pm.P_hover * tDesc) / 3600;
+    const E_Wh = routeEnergyWh({ tFlight, tQueue, tClimb, tDesc }, UAV.payloadKg);
     return {
         path, legs, d, tFlight, tQueue, tClimb, tDesc, rfzHit: [...new Set(legs.flatMap(l => l.rfz))],
         tTotal: tFlight + tQueue + tClimb + tDesc, E_Wh, batteryPct: E_Wh / UAV.battery_Wh * 100,
@@ -1084,7 +1101,7 @@ function spawnDrone() {
     const label = L.marker(coords[0], { interactive: false, icon: L.divIcon({ className: 'drone-icon',
         html: `<div class="map-label lbl-uav" style="color:#e2e8f0">${id}</div>`, iconSize: [50, 12], iconAnchor: [25, -6] }) });
     droneLayer.addLayer(marker); droneLayer.addLayer(label);
-    const d = { id, od: od.name, dest: od.to, plan, pathIds: plan.path, coords, cum, s: 0, tDep, delay, delayWhy, tReq: simTime,
+    const d = { id, od: od.name, dest: od.to, plan, pathIds: plan.path, coords, cum, s: 0, tDep, delay, delayWhy, tReq: simTime, payloadKg: UAV.payloadKg,
                 state: 'ground', timer: 0, speedFactor: 1, conflictWith: null, marker, label, iconKey: null, popupTick: 0,
                 energyWh: 0, health: { motor: 1, c2: 1, c2LossS: 0, detectedGust: 0 } };
     setIcon(d, 'ground');
@@ -1143,18 +1160,18 @@ function updateDrones(ts) {
                 break;
             case 'climb':
                 d.timer += dt;
-                d.energyWh += powerModel(droneAltitude(d)).P_climb * dt / 3600;
+                d.energyWh += powerModel(droneAltitude(d), d.payloadKg).P_climb * dt / 3600;
                 if (d.timer >= d.plan.tClimb) d.state = 'flying';
                 break;
             case 'emergency_gate':
                 d.timer += dt;
-                d.energyWh += powerModel(d.emg.originalAlt).P_hover * dt / 3600;
+                d.energyWh += powerModel(d.emg.originalAlt, d.payloadKg).P_hover * dt / 3600;
                 setIcon(d, 'transition');
                 if (d.timer >= d.emg.gateDelay) { d.state = 'emergency_descent'; d.timer = 0; }
                 break;
             case 'emergency_descent':
                 d.timer += dt;
-                d.energyWh += powerModel(droneAltitude(d)).P_hover * dt / 3600;
+                d.energyWh += powerModel(droneAltitude(d), d.payloadKg).P_hover * dt / 3600;
                 setIcon(d, 'transition');
                 if (d.timer >= d.emg.transitionS) {
                     d.state = 'flying'; d.timer = 0;
@@ -1176,7 +1193,7 @@ function updateDrones(ts) {
                 }
                 const gs = groundSpeed(d.coords[i], d.coords[i + 1], d.emg ? LEVEL_E : undefined);
                 d.s += (gs.feasible ? gs.vg : 3) * (last ? APPROACH_F : 1) * d.speedFactor * dt;
-                d.energyWh += powerModel(droneAltitude(d)).P_cruise * dt / 3600;
+                d.energyWh += powerModel(droneAltitude(d), d.payloadKg).P_cruise * dt / 3600;
                 d.health.detectedGust = Math.max(d.health.detectedGust || 0, gs.gust || 0);
                 setIcon(d, d.emg ? 'emg' : d.speedFactor < 0.5 ? 'slow' : droneLevel(d) === 1 ? 'L1' : 'L2');
                 if (d.s >= d.cum[d.cum.length - 1]) {
@@ -1187,7 +1204,7 @@ function updateDrones(ts) {
             }
             case 'holding': {
                 d.timer += dt; stats.holdTime += dt;
-                d.energyWh += powerModel(droneAltitude(d)).P_hover * dt / 3600;
+                d.energyWh += powerModel(droneAltitude(d), d.payloadKg).P_hover * dt / 3600;
                 const fix = d.coords[d.coords.length - 2];
                 const ang = simTime * (UAV.v_air / R_HOLD) * 0.5;
                 const p = [fix[0] + Math.sin(ang) * R_HOLD / 110540, fix[1] + Math.cos(ang) * R_HOLD / (111320 * COS0)];
@@ -1197,7 +1214,7 @@ function updateDrones(ts) {
             }
             case 'landing':
                 d.timer += dt;
-                d.energyWh += powerModel(droneAltitude(d)).P_hover * dt / 3600;
+                d.energyWh += powerModel(droneAltitude(d), d.payloadKg).P_hover * dt / 3600;
                 if (d.timer >= d.plan.tDesc) {
                     d.state = 'landed'; d.timer = 0; setIcon(d, 'landed');
                     if (d.emg) {
@@ -1279,7 +1296,7 @@ function showFleetLive() {
         <span>Battery ≤ 25 %</span><b style="color:${low ? '#f87171' : '#e2e8f0'}">${low}</b></div>
         <table class="tbl board"><tr><th>Pier</th><th>Waiting</th><th>On pad</th><th>Inbound</th><th>Pad used by</th></tr>${pierRows}</table>
         <table class="tbl board"><tr><th>UAV · phase</th><th>Route</th><th>Batt.</th></tr>${uavRows || '<tr><td colspan="3">No UAV in the system</td></tr>'}</table>`,
-        CARD_WIDTH, 'fleet', `Battery = 100 % at take-off minus the energy used so far (950 Wh pack). Below 25 % a UAV triggers the low-battery emergency. Waiting = on the pier before take-off; On pad = landing or unloading; Inbound = flying to this pier. Click a UAV row to highlight it on the map.<br><span class="muted">In the live twin each order is flown by a newly dispatched UAV; the fixed-fleet case (UAVs that stay, recharge and are repositioned) is in the left panel › Fleet.</span>`);
+        CARD_WIDTH, 'fleet', `Battery = 100 % at take-off minus energy used so far (Matrice 4E 99.5 Wh pack, nominal 100 g parcel). Below 25 % a UAV triggers the study low-battery emergency. Waiting = on the pier before take-off; On pad = landing or unloading; Inbound = flying to this pier. Click a UAV row to highlight it on the map.<br><span class="muted">The live twin dispatches a new UAV for each order. Finite aircraft, removable batteries, hub queues and swaps are modelled in Fleet.</span>`);
 }
 function resetTraffic() {
     activeDrones.length = 0; droneLayer.clearLayers();
@@ -1358,7 +1375,7 @@ function routeLinkPenalty(path) {
 function emergencyOptions(d) {
     const i = segIndex(d), pos = dronePos(d), nextNode = d.pathIds[i + 1];
     const originalAlt = droneAltitude(d), transitionS = Math.max(1, (originalAlt - LEVEL_ALT[LEVEL_E]) / UAV.v_descent);
-    const pm = powerModel(LEVEL_ALT[LEVEL_E]), options = [];
+    const pm = powerModel(LEVEL_ALT[LEVEL_E], d.payloadKg), options = [];
     const why = d.emgWhy = { route: 0, energy: 0, slot: 0, pad: 0 };
     Object.keys(PIERS).forEach(pid => {
         const plan = aStar(nextNode, pid, {}, (u, v) => edgeCost(u, v, {}, LEVEL_E), LEVEL_E);
@@ -1465,41 +1482,57 @@ function triggerEmergency() {
 }
 
 // Static response-test helper (does not mutate the live reservation table).
-function emergencyDivert(fromPos, nextNode, prevNode, legLen) {
+function emergencyDivert(fromPos, nextNode, legLen, originalAlt, availableWh) {
     let best = null;
+    const transitionS = Math.max(0, (originalAlt - LEVEL_ALT[LEVEL_E]) / UAV.v_descent);
+    const pm = powerModel(LEVEL_ALT[LEVEL_E], UAV.payloadKg);
     Object.keys(PIERS).forEach(pid => {
         const plan = aStar(nextNode, pid, {}, (u, v) => edgeCost(u, v, {}, LEVEL_E), LEVEL_E);
         if (!plan) return;
         const gs = groundSpeed(fromPos, WP[nextNode], LEVEL_E);
-        const t = legLen / Math.max(gs.vg, 3) + (plan.tFlight || 0) + LEVEL_E_DESC;
-        if (!best || t < best.t) best = { pid, plan, t };
+        if (!gs.feasible || gs.w > UAV.maxWind || gs.gust > UAV.maxGust) return;
+        const last = plan.legs.at(-1);
+        const flightS = legLen / gs.vg + plan.tFlight + (last ? last.tFlight * (1 / APPROACH_F - 1) : 0);
+        const energyWh = (pm.P_hover * (transitionS + LEVEL_E_DESC) + pm.P_cruise * flightS) / 3600;
+        if (energyWh > availableWh) return;
+        const t = transitionS + flightS + LEVEL_E_DESC;
+        if (!best || t < best.t) best = { pid, plan, t, energyWh };
     });
     return best;
 }
 
 // Offline response test: an emergency at the midpoint of every cruise leg of all 24 directional cross-harbour OD routes
 function emergencyResponseTest() {
-    const rows = [];
+    const rows = []; let attempted = 0, withoutDiversion = 0;
+    const pm = powerModel(100, UAV.payloadKg);
     odRoutes.forEach(od => {
         const plan = aStar(od.from, od.to, {});
-        if (!plan) return;
+        if (!plan || !plan.feasibleBattery) return;
         plan.legs.forEach((l, i) => {
             if (i === 0 || i === plan.legs.length - 1) return;           // pier spurs excluded
+            attempted++;
             const mid = [(WP[l.from][0] + WP[l.to][0]) / 2, (WP[l.from][1] + WP[l.to][1]) / 2];
             const half = l.d / 2;
-            const best = emergencyDivert(mid, l.to, l.from, half);
-            if (!best) return;
+            const elapsedCruise = plan.legs.slice(0, i).reduce((a, x) => a + x.tFlight, 0) + half / l.vg;
+            const usedWh = (pm.P_climb * plan.tClimb + pm.P_cruise * elapsedCruise) / 3600;
+            const availableWh = UAV.battery_Wh * (1 - EMG_RESERVE) - usedWh;
+            const best = emergencyDivert(mid, l.to, half, l.z, availableWh);
+            if (!best) { withoutDiversion++; return; }
             const rest = plan.legs.slice(i + 1);
             const tCont = half / l.vg + rest.reduce((a, r, k) => a + r.d / (k === rest.length - 1 ? r.vg * APPROACH_F : r.vg), 0) + plan.tDesc;
-            const tE = best.t + (best.plan.legs ? best.plan.legs.at(-1).d / Math.max(best.plan.legs.at(-1).vg, 3) * (1 / APPROACH_F - 1) : 0);
+            const tE = best.t;
             rows.push({ od: od.name, leg: `${l.from}→${l.to}`, tE, tCont, pier: best.pid, orig: od.to });
         });
     });
-    return rows;
+    return { rows, attempted, withoutDiversion };
 }
 function showLayerModel() { openGuide('layers'); }
 function showEmergency() {
-    const rows = emergencyResponseTest();
+    const { rows, attempted, withoutDiversion } = emergencyResponseTest();
+    if (!rows.length) {
+        showInfo('Emergency response test', `No battery- and wind-feasible diversion for the ${attempted} cruise-leg midpoint events under the current wind field.`, CARD_WIDTH, 'main');
+        return;
+    }
     const tE = rows.map(r => r.tE), tC = rows.map(r => r.tCont);
     const diverted = rows.filter(r => r.pier !== r.orig).length;
     const worst = rows.slice().sort((a, b) => b.tE - a.tE).slice(0, 5);
@@ -1508,9 +1541,9 @@ function showEmergency() {
         <table class="tbl"><tr><th>Event → touchdown</th><th>Mean</th><th>Max</th></tr>
         <tr><td>Divert via layer E</td><td><b>${(mean(tE) / 60).toFixed(2)} min</b></td><td>${(Math.max(...tE) / 60).toFixed(2)} min</td></tr>
         <tr><td>Continue to destination</td><td>${(mean(tC) / 60).toFixed(2)} min</td><td>${(Math.max(...tC) / 60).toFixed(2)} min</td></tr></table>
-        <div class="kpi"><span>Events</span><b>${rows.length}</b><span>Diverted to another pier</span><b>${diverted} (${(diverted / rows.length * 100).toFixed(0)} %)</b></div>`,
+        <div class="kpi"><span>Feasible / tested</span><b>${rows.length} / ${attempted}</b><span>No feasible diversion</span><b>${withoutDiversion}</b><span>Diverted to another pier</span><b>${diverted} (${(diverted / rows.length * 100).toFixed(0)} %)</b></div>`,
         CARD_WIDTH, 'main', `
-        <b>Test design</b> — one emergency at the midpoint of every cruise leg of all ${OD_COUNT} directional cross-harbour routes (${rows.length} events, current wind).<br>
+        <b>Test design</b> — one emergency at the midpoint of every cruise leg of battery-feasible routes among the ${OD_COUNT} directional cross-harbour pairs (${attempted} tested, ${rows.length} with a battery- and wind-feasible diversion). Times compare those ${rows.length} paired cases under the current wind.<br>
         Slowest cases: ${worst.map(r => `${r.od} on ${r.leg} → ${PIERS[r.pier].short} ${(r.tE / 60).toFixed(1)} min`).join('; ')}<br>
         Wind on layer E (Central → TST): ${isFinite(e.cost) ? e.w.toFixed(1) : '—'} m/s vs ${isFinite(a.cost) ? a.w.toFixed(1) : '—'} m/s at ${a.z} m.<br><br>
         <b>Layer E rules</b><br>
@@ -1533,7 +1566,7 @@ function startAnimation() {
     if (fromId === 'ALL' || toId === 'ALL') { addLog('Select a specific origin and destination pier to plan a route', 'err'); return; }
     if (!isCrossHarbourOD(fromId, toId)) { addLog('Normal routes must connect Hong Kong Island and Kowloon; choose an opposite-shore destination', 'err'); return; }
     const plan = aStar(fromId, toId, currentEdgeCounts());
-    if (!plan) { addLog('No feasible route (wind / capacity)', 'err'); return; }
+    if (!plan || !plan.feasibleBattery) { addLog('No feasible route (wind / capacity / battery)', 'err'); return; }
     toggleBtn('btnAnimate', true);
     const color = PIERS[fromId].color, name = `${PIERS[fromId].short} → ${PIERS[toId].short}`;
     const why = explainRoute(fromId, toId, plan);
@@ -1678,52 +1711,98 @@ function closeFleet() { document.getElementById('fleetOverlay').classList.remove
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeFleet(); });
 function fleetParams() {
     const v = id => parseFloat(document.getElementById(id).value);
-    return { n: Math.max(1, Math.round(v('flN'))), bat: v('flBat'), chg: v('flChg'), charge90Min: v('flChg90'), chargeFullMin: v('flChgFull'), rate: v('flRate'), dur: v('flDur'), seed: Math.round(v('flSeed')), strat: document.getElementById('flStrat').value, tgt: Math.max(0, Math.round(v('flTgt'))) };
+    return { n: Math.max(1, Math.round(v('flN'))), bat: UAV.battery_Wh, chg: v('flChg'),
+        charge90Min: v('flChg90'), chargeFullMin: v('flChgFull'), targetSoc: v('flTarget'),
+        spares: Math.max(0, Math.round(v('flSpares'))), hubs: Math.max(1, Math.round(v('flHubs'))),
+        swapSec: Math.max(0, v('flSwap')), payloadKg: Math.max(0, Math.min(UAV.maxPayloadKg, v('flPayload') / 1000)),
+        rate: v('flRate'), dur: v('flDur'), seed: Math.round(v('flSeed')),
+        strat: document.getElementById('flStrat').value, tgt: Math.max(0, Math.round(v('flTgt'))) };
 }
 function fleetSim(P) {
-    const rng = mulberry32(P.seed), piers = Object.keys(PIERS), RESERVE = 0.2, dt = 5, T = P.dur * 60;
+    const rng = mulberry32(P.seed), piers = Object.keys(PIERS), RESERVE = UAV.reserve, dt = 5, T = P.dur * 60;
     const plans = {}; piers.forEach(a => piers.forEach(b => { if (a !== b) plans[a + '>' + b] = aStar(a, b, {}); }));
     const res = { nodes: {}, pads: {}, trajs: [], verticals: [], vert: {} };
-    const uavs = []; piers.forEach(p => { for (let k = 0; k < P.n; k++) uavs.push({ id: `F${String(uavs.length + 1).padStart(2, '0')}`, home: p, at: p, wh: P.bat, state: 'idle', tFree: 0, trips: 0, empty: 0, used: 0, tFly: 0, tChg: 0, tIdle: 0, charges: 0, wasCharging: false }); });
+    let batteryId = 0, chargesCompleted = 0, maxHubUse = 0;
+    const makeBattery = () => ({ id: `B${String(++batteryId).padStart(3, '0')}`, wh: P.bat, state: 'ready' });
+    // Batteries are physical objects: each UAV starts with one installed, plus separate pier spares.
+    const pool = {}; piers.forEach(p => pool[p] = Array.from({ length: P.spares }, makeBattery));
+    const uavs = []; piers.forEach(p => { for (let k = 0; k < P.n; k++) uavs.push({
+        id: `F${String(uavs.length + 1).padStart(2, '0')}`, home: p, at: p, battery: makeBattery(),
+        wh: P.bat, state: 'idle', tFree: 0, trips: 0, empty: 0, used: 0,
+        tFly: 0, tWaitBat: 0, tSwap: 0, swaps: 0, tIdle: 0,
+    }); });
     const orders = [], queue = {}; piers.forEach(p => queue[p] = []);
     let tNext = 0, oid = 0, repos = 0, homes = 0; const series = [], snaps = [];
     const ods = odRoutes.map(o => [o.from, o.to]);
-    const maxE = {}; piers.forEach(a => maxE[a] = Math.max(...piers.filter(b => b !== a && plans[a + '>' + b]).map(b => plans[a + '>' + b].E_Wh)));
+    const energy = (plan, payloadKg) => plan ? routeEnergyWh(plan, payloadKg) : Infinity;
+    const feasible = (a, b, payloadKg) => energy(plans[a + '>' + b], payloadKg) <= (1 - RESERVE) * P.bat;
+    const maxE = {}; piers.forEach(a => maxE[a] = Math.max(0, ...odRoutes.filter(o => o.from === a && feasible(a, o.to, P.payloadKg))
+        .map(o => energy(plans[a + '>' + o.to], P.payloadKg))));
     const nextArrival = () => -Math.log(1 - rng()) / (P.rate / 60);
     tNext = nextArrival();
     const launch = (u, from, to, t, order) => {
-        const plan = plans[from + '>' + to]; if (!plan) return false;
+        const plan = plans[from + '>' + to], planE = energy(plan, order ? P.payloadKg : 0);
+        if (!plan || !u.battery || u.state !== 'idle' || planE + RESERVE * P.bat > u.battery.wh) return false;
         const s = scheduleDeparture(plan, t, res, 600); if (!s) return false;
         reserve(s.tl, to, u.id + '#' + (u.trips + u.empty), res);
-        u.state = 'booked'; u.tDep = t + s.delay; u.tFree = s.tl.padFree; u.to = to; u.planE = plan.E_Wh; u.order = order;
-        if (order) { order.tDep = u.tDep; order.uav = u.id; u.trips++; } else { u.empty++; repos++; if (to === u.home && order === null && u.goingHome) homes++; } u.goingHome = false;
+        u.state = 'booked'; u.tDep = t + s.delay; u.tAirEnd = s.tl.tPier + plan.tDesc;
+        u.tFree = s.tl.padFree; u.to = to; u.planE = planE; u.order = order;
+        if (order) { order.tDep = u.tDep; order.tArr = u.tAirEnd; order.uav = u.id; u.trips++; }
+        else { u.empty++; repos++; if (to === u.home && u.goingHome) homes++; }
+        u.goingHome = false;
         return true;
     };
     for (let t = 0; t <= T; t += dt) {
-        while (tNext <= t && tNext <= T) { const [a, b] = ods[Math.floor(rng() * ods.length)]; const o = { id: ++oid, from: a, to: b, tCreate: tNext }; orders.push(o); queue[a].push(o); tNext += nextArrival(); }
-        // UAV state updates
+        while (tNext <= t && tNext <= T) {
+            const [a, b] = ods[Math.floor(rng() * ods.length)];
+            const o = { id: ++oid, from: a, to: b, tCreate: tNext, payloadKg: P.payloadKg };
+            orders.push(o);
+            if (feasible(a, b, P.payloadKg)) queue[a].push(o);
+            else o.infeasible = true;
+            tNext += nextArrival();
+        }
+        // Arrival removes the spent battery from the aircraft. Charging is never done in the aircraft.
         uavs.forEach(u => {
-            u.chgNow = false;
-            if (u.state === 'booked' && t >= u.tDep) { u.state = 'flying'; u.wh -= u.planE; u.used += u.planE; }
-            if (u.state === 'flying' && t >= u.tFree) { u.state = 'idle'; u.at = u.to; }
-            if (u.state === 'flying') u.tFly += dt;
-            else if (u.wh < P.bat - 1e-6) {
-                // DJI Matrice 4E standard 100 W hub profile: about 60 min to 90 %, 78 min to full.
-                // Charge time is calibrated independently of the twin's existing flight-energy scale.
-                const soc = u.wh / P.bat;
-                const fracPerSecond = soc < 0.9
-                    ? 0.9 / (P.charge90Min * 60)
-                    : 0.1 / ((P.chargeFullMin - P.charge90Min) * 60);
-                const add = Math.min(P.bat - u.wh, P.bat * fracPerSecond * dt);
-                u.wh += add; u.chgNow = true; u.tChg += dt; if (!u.wasCharging) { u.charges++; u.wasCharging = true; }
+            if (u.state === 'booked' && t >= u.tDep) {
+                u.state = 'flying'; u.battery.wh = Math.max(0, u.battery.wh - u.planE);
+                u.wh = u.battery.wh; u.used += u.planE;
             }
-            else { u.tIdle += dt; u.wasCharging = false; }
-            if (u.state === 'flying') u.wasCharging = false;
+            if (u.state === 'flying' && t >= u.tAirEnd) { u.state = 'unloading'; u.at = u.to; }
+            if (u.state === 'unloading' && t >= u.tFree) {
+                u.battery.state = u.battery.wh >= P.bat * P.targetSoc - 1e-6 ? 'ready' : 'queued';
+                pool[u.at].push(u.battery);
+                u.battery = null; u.wh = 0; u.state = 'awaitingBattery';
+            }
+            if (u.state === 'swapping' && t >= u.tSwapReady) u.state = 'idle';
+            if (u.state === 'flying') u.tFly += dt;
+            else if (u.state === 'awaitingBattery') u.tWaitBat += dt;
+            else if (u.state === 'swapping') u.tSwap += dt;
+            else if (u.state === 'idle') u.tIdle += dt;
+        });
+        // Each 100 W hub charges one removed battery at a time; four bays on a hub are sequential.
+        piers.forEach(p => {
+            const batteries = pool[p], targetWh = P.bat * P.targetSoc;
+            let active = batteries.filter(b => b.state === 'charging').length;
+            batteries.filter(b => b.state === 'queued').slice(0, Math.max(0, P.hubs - active)).forEach(b => { b.state = 'charging'; active++; });
+            maxHubUse = Math.max(maxHubUse, active);
+            batteries.filter(b => b.state === 'charging').forEach(b => {
+                const soc = b.wh / P.bat;
+                const fracPerSecond = soc < 0.9 ? 0.9 / (P.charge90Min * 60)
+                    : 0.1 / ((P.chargeFullMin - P.charge90Min) * 60);
+                b.wh = Math.min(targetWh, b.wh + P.bat * fracPerSecond * dt);
+                if (b.wh >= targetWh - 1e-6) { b.state = 'ready'; chargesCompleted++; }
+            });
+            uavs.filter(u => u.at === p && u.state === 'awaitingBattery').forEach(u => {
+                const ix = batteries.findIndex(b => b.state === 'ready');
+                if (ix < 0) return;
+                u.battery = batteries.splice(ix, 1)[0]; u.wh = u.battery.wh;
+                u.state = 'swapping'; u.tSwapReady = t + P.swapSec; u.swaps++;
+            });
         });
         // assign waiting orders to UAVs at their origin pier
         piers.forEach(p => {
             while (queue[p].length) {
-                const o = queue[p][0], need = plans[o.from + '>' + o.to].E_Wh + RESERVE * P.bat;
+                const o = queue[p][0], need = energy(plans[o.from + '>' + o.to], P.payloadKg) + RESERVE * P.bat;
                 const u = uavs.filter(x => x.state === 'idle' && x.at === p && x.wh >= need).sort((a, b) => b.wh - a.wh)[0];
                 if (!u || !launch(u, o.from, o.to, t, o)) break;
                 queue[p].shift();
@@ -1733,12 +1812,14 @@ function fleetSim(P) {
         if (P.strat === 'reactive') piers.forEach(p => {
             if (!queue[p].length) return;
             const inbound = uavs.filter(x => (x.state === 'booked' || x.state === 'flying') && x.to === p).length;
-            const usableHere = uavs.filter(x => x.state === 'idle' && x.at === p).length;
+            const first = queue[p][0];
+            const usableHere = uavs.filter(x => x.state === 'idle' && x.at === p
+                && x.wh >= energy(plans[first.from + '>' + first.to], P.payloadKg) + RESERVE * P.bat).length;
             if (inbound + usableHere >= queue[p].length) return;
-            const donors = piers.filter(q => q !== p).map(q => ({ q, spare: uavs.filter(x => x.state === 'idle' && x.at === q).length - queue[q].length }))
+            const donors = piers.filter(q => q !== p && feasible(q, p, 0)).map(q => ({ q, spare: uavs.filter(x => x.state === 'idle' && x.at === q).length - queue[q].length }))
                 .filter(d => d.spare > 0).sort((a, b) => plans[a.q + '>' + p].tTotal - plans[b.q + '>' + p].tTotal);
             for (const d of donors) {
-                const need = plans[d.q + '>' + p].E_Wh + RESERVE * P.bat;
+                const need = energy(plans[d.q + '>' + p], 0) + RESERVE * P.bat;
                 const u = uavs.filter(x => x.state === 'idle' && x.at === d.q && x.wh >= need).sort((a, b) => b.wh - a.wh)[0];
                 if (u && launch(u, d.q, p, t, null)) break;
             }
@@ -1751,9 +1832,10 @@ function fleetSim(P) {
             // (1) top up piers below target from the nearest pier above target
             piers.map(q => ({ q, gap: P.tgt - supply(q) })).filter(d => d.gap > 0).sort((a, b) => b.gap - a.gap).forEach(({ q, gap }) => {
                 for (let k = 0; k < gap; k++) {
-                    const donor = piers.filter(d => d !== q && spare(d) > 0).sort((a, b) => plans[a + '>' + q].tTotal - plans[b + '>' + q].tTotal)[0];
+                    const donor = piers.filter(d => d !== q && spare(d) > 0 && feasible(d, q, 0))
+                        .sort((a, b) => plans[a + '>' + q].tTotal - plans[b + '>' + q].tTotal)[0];
                     if (!donor) break;
-                    const need = plans[donor + '>' + q].E_Wh + RESERVE * P.bat;
+                    const need = energy(plans[donor + '>' + q], 0) + RESERVE * P.bat;
                     const u = ready(donor).filter(x => x.wh >= need).sort((a, b) => b.wh - a.wh)[0];
                     if (!u || !launch(u, donor, q, t, null)) break;
                 }
@@ -1763,21 +1845,27 @@ function fleetSim(P) {
                 if (queue[q].length) return;
                 const here = uavs.filter(x => x.state === 'idle' && x.at === q);
                 if (here.length <= P.n) return;
-                const u = here.filter(x => x.home !== q && x.wh >= plans[q + '>' + x.home].E_Wh + RESERVE * P.bat
+                const u = here.filter(x => x.home !== q && x.state === 'idle' && feasible(q, x.home, 0)
+                    && x.wh >= energy(plans[q + '>' + x.home], 0) + RESERVE * P.bat
                     && uavs.filter(y => (y.state === 'idle' && y.at === x.home) || ((y.state === 'booked' || y.state === 'flying') && y.to === x.home)).length < P.n)
                     .sort((a, b) => b.wh - a.wh)[0];
                 if (u) { u.goingHome = true; launch(u, q, u.home, t, null); }
             });
         }
-        if (t % 60 === 0) snaps.push({ q: piers.map(p => queue[p].length), u: uavs.map(u => ({ at: u.at, to: u.to, st: u.state, wh: u.wh, chg: !!u.chgNow, ord: !!u.order })) });
+        if (t % 60 === 0) snaps.push({ q: piers.map(p => queue[p].length),
+            u: uavs.map(u => ({ at: u.at, to: u.to, st: u.state, wh: u.wh, batteryId: u.battery?.id, ord: !!u.order })),
+            pool: piers.map(p => ({ ready: pool[p].filter(b => b.state === 'ready').length,
+                charging: pool[p].filter(b => b.state === 'charging').length,
+                queued: pool[p].filter(b => b.state === 'queued').length })) });
         if (t % 60 === 0) series.push({ t: t / 60, waiting: piers.reduce((a, p) => a + queue[p].length, 0), idle: uavs.filter(x => x.state === 'idle').length, air: uavs.filter(x => x.state === 'flying').length,
-            soc: 100 * uavs.reduce((a, x) => a + x.wh, 0) / (uavs.length * P.bat) });
+            soc: 100 * (uavs.reduce((a, x) => a + x.wh, 0) + piers.reduce((a, p) => a + pool[p].reduce((s, b) => s + b.wh, 0), 0)) / (batteryId * P.bat) });
     }
-    const served = orders.filter(o => o.tDep !== undefined && o.tDep <= T), waits = served.map(o => o.tDep - o.tCreate).sort((a, b) => a - b);
-    const byPier = piers.map(p => { const os = orders.filter(o => o.from === p), sv = os.filter(o => o.tDep !== undefined && o.tDep <= T), w = sv.map(o => o.tDep - o.tCreate);
+    const served = orders.filter(o => o.tArr !== undefined && o.tArr <= T), waits = served.map(o => o.tDep - o.tCreate).sort((a, b) => a - b);
+    const byPier = piers.map(p => { const os = orders.filter(o => o.from === p), sv = os.filter(o => o.tArr !== undefined && o.tArr <= T), w = sv.map(o => o.tDep - o.tCreate);
         return { p, orders: os.length, served: sv.length, wait: mean(w), maxQ: Math.max(0, ...series.map(() => 0)), end: uavs.filter(u => u.at === p && u.state !== 'flying').length, queueEnd: queue[p].length }; });
     const totalUsed = uavs.reduce((a, u) => a + u.used, 0);
-    return { P, uavs, orders, served, waits, series, snaps, repos, homes, byPier, totalUsed,
+    return { P, uavs, orders, served, waits, series, snaps, repos, homes, byPier, totalUsed, pool,
+        batteryCount: batteryId, chargesCompleted, maxHubUse, infeasible: orders.filter(o => o.infeasible).length,
         meanWait: mean(waits), p95: waits.length ? waits[Math.floor(waits.length * 0.95)] : 0, util: mean(uavs.map(u => u.tFly / (T + 1))) };
 }
 const FL = { r: null, play: null };
@@ -1787,13 +1875,16 @@ function fleetPierView(min) {
     document.getElementById('flMin').textContent = min;
     const ids = r.uavs.map(u => u.id);
     const row = (u, i) => {
-        const pct = 100 * u.wh / P.bat;
-        const st = u.st === 'booked' ? `<span style="color:#fbbf24">booked → ${PIERS[u.to].short}</span>` : u.chg ? `<span style="color:#4ade80">⚡ ${(P.chg * 1000).toFixed(0)} W hub</span>` : '<span class="muted">full</span>';
-        return `<tr><td>${ids[i]}</td><td style="white-space:nowrap">${batBar(pct)}</td><td>${u.wh.toFixed(0)} / ${P.bat} Wh</td><td>${st}</td></tr>`; };
+        const st = u.st === 'booked' ? `<span style="color:#fbbf24">booked → ${PIERS[u.to].short}</span>`
+            : u.st === 'unloading' ? 'unloading' : u.st === 'swapping' ? 'swapping battery'
+            : u.st === 'awaitingBattery' ? '<span style="color:#fbbf24">waiting for charged battery</span>' : 'ready';
+        return `<tr><td>${ids[i]}</td><td style="white-space:nowrap">${u.batteryId ? batBar(100 * u.wh / P.bat) : '—'}</td><td>${u.batteryId ? `${u.batteryId}: ${u.wh.toFixed(1)} / ${P.bat} Wh` : 'no battery installed'}</td><td>${st}</td></tr>`; };
     const cards = piers.map((p, k) => {
         const here = S.u.map((u, i) => [u, i]).filter(([u]) => u.st !== 'flying' && u.at === p);
+        const bp = S.pool[k];
         return `<div class="fl-pier"><div class="fl-ph"><b>${PIERS[p].short}</b> <span>${PIERS[p].name || ''}</span><span class="fl-q${S.q[k] ? ' on' : ''}">${S.q[k]} order${S.q[k] === 1 ? '' : 's'} waiting</span></div>
-            <table class="tbl"><tr><th>UAV</th><th>Battery</th><th>Remaining / capacity</th><th>Charging</th></tr>${here.map(([u, i]) => row(u, i)).join('') || '<tr><td colspan="4" class="muted">no UAV parked</td></tr>'}</table></div>`; }).join('');
+            <div class="muted">Battery stock: ${bp.ready} ready · ${bp.charging}/${P.hubs} hubs busy · ${bp.queued} queued</div>
+            <table class="tbl"><tr><th>UAV</th><th>Battery</th><th>Remaining / capacity</th><th>State</th></tr>${here.map(([u, i]) => row(u, i)).join('') || '<tr><td colspan="4" class="muted">no UAV parked</td></tr>'}</table></div>`; }).join('');
     const air = S.u.map((u, i) => [u, i]).filter(([u]) => u.st === 'flying');
     const airTxt = air.length ? air.map(([u, i]) => `<span class="fl-air">${ids[i]} ${PIERS[u.at].short} → ${PIERS[u.to].short}${u.ord ? '' : ' (empty)'} · ${(100 * u.wh / P.bat).toFixed(0)} %</span>`).join('') : '<span class="muted">none</span>';
     document.getElementById('flPiers').innerHTML = `<div class="fl-airrow"><b>In the air (${air.length})</b> ${airTxt}</div><div class="fl-piers">${cards}</div>`;
@@ -1814,7 +1905,7 @@ function fleetChart(series) {
     return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;background:rgba(2,6,23,0.4);border-radius:8px">
         <line x1="${x0}" y1="${y0 + h}" x2="${x0 + w}" y2="${y0 + h}" stroke="#334155"/><text x="${x0 - 6}" y="${y0 + 8}" fill="#64748b" font-size="10" text-anchor="end">${vMax}</text><text x="${x0 - 6}" y="${y0 + h}" fill="#64748b" font-size="10" text-anchor="end">0</text>
         ${ticks}${line('waiting', '#f87171')}${line('idle', '#4ade80')}${line('air', '#60a5fa')}${line('soc', '#fbbf24', Ys)}</svg>
-        <div class="muted"><span style="color:#f87171">■</span> orders waiting &nbsp; <span style="color:#4ade80">■</span> UAVs idle / charging on a pier &nbsp; <span style="color:#60a5fa">■</span> UAVs flying &nbsp; <span style="color:#fbbf24">■</span> mean fleet charge (0–100 %) &nbsp; · x = minutes</div>`;
+        <div class="muted"><span style="color:#f87171">■</span> orders waiting &nbsp; <span style="color:#4ade80">■</span> UAVs ready on a pier &nbsp; <span style="color:#60a5fa">■</span> UAVs flying &nbsp; <span style="color:#fbbf24">■</span> mean charge of all batteries (0–100 %) &nbsp; · x = minutes</div>`;
 }
 function runFleet() {
     const out = document.getElementById('flOut'); out.innerHTML = '<p class="muted">Running…</p>';
@@ -1822,26 +1913,29 @@ function runFleet() {
         const P = fleetParams(), r = fleetSim(P), T = P.dur;
         const k = (v, l) => `<div class="fl-kpi"><b>${v}</b><span>${l}</span></div>`;
         const pierRows = r.byPier.map(b => `<tr><td>${PIERS[b.p].short}</td><td>${b.orders}</td><td>${b.served}</td><td>${b.queueEnd}</td><td>${isFinite(b.wait) ? (b.wait / 60).toFixed(1) : '—'}</td><td>${b.end}</td></tr>`).join('');
-        const uavRows = r.uavs.map(u => `<tr><td>${u.id}</td><td>${PIERS[u.home].short}</td><td>${PIERS[u.at].short}${u.state === 'flying' ? ' (flying)' : ''}</td><td>${u.trips}</td><td>${u.empty}</td><td>${(u.used / 1000).toFixed(2)}</td><td>${batBar(100 * u.wh / P.bat)}</td><td>${(100 * u.tFly / (T * 60)).toFixed(0)} %</td><td>${(100 * u.tChg / (T * 60)).toFixed(0)} %</td></tr>`).join('');
+        const uavRows = r.uavs.map(u => `<tr><td>${u.id}</td><td>${PIERS[u.home].short}</td><td>${PIERS[u.at].short}${u.state === 'flying' ? ' (flying)' : ''}</td><td>${u.trips}</td><td>${u.empty}</td><td>${(u.used / 1000).toFixed(2)}</td><td>${u.battery ? batBar(100 * u.wh / P.bat) : '—'}</td><td>${(100 * u.tFly / (T * 60)).toFixed(0)} %</td><td>${(100 * u.tWaitBat / (T * 60)).toFixed(0)} %</td><td>${u.swaps}</td></tr>`).join('');
         FL.r = r; if (FL.play) { clearInterval(FL.play); FL.play = null; }
-        out.innerHTML = `<h4 style="margin-top:0">Piers at minute <span id="flMin">${T}</span> <span class="muted">· which UAV is parked where, its remaining charge, battery capacity and charging power</span></h4>
+        out.innerHTML = `<h4 style="margin-top:0">Piers at minute <span id="flMin">${T}</span> <span class="muted">· aircraft, installed batteries and charging stock</span></h4>
           <div class="fl-time"><button class="btn" id="flPlayBtn" onclick="fleetPlay()">▶ Play</button><input id="flSlider" type="range" min="0" max="${r.snaps.length - 1}" value="${r.snaps.length - 1}" oninput="fleetPierView(this.value)"><span class="muted">0 – ${T} min</span></div>
           <div id="flPiers"></div>
           <h4>Summary</h4><div class="fl-kpis">
-            ${k(`${r.served.length} / ${r.orders.length}`, 'orders served / created')}
+            ${k(`${r.served.length} / ${r.orders.length}`, 'delivered / created')}
             ${k(`${(r.meanWait / 60).toFixed(1)} min`, 'mean wait (order → take-off)')}
             ${k(`${(r.p95 / 60).toFixed(1)} min`, '95th-percentile wait')}
             ${k(`${(100 * r.util).toFixed(0)} %`, 'fleet time in the air')}
             ${k(r.repos, P.strat === 'proactive' ? `empty flights · ${r.homes} back home` : 'empty repositioning flights')}
             ${k(`${(r.totalUsed / 1000).toFixed(1)} kWh`, `energy used · ${r.served.length ? (r.totalUsed / r.served.length).toFixed(0) : '—'} Wh per order`)}
             ${k(`${r.uavs.length}`, `UAVs (${P.n} per pier × 7)`)}
+            ${k(`${r.batteryCount}`, `physical batteries · ${P.spares} spare/pier`)}
+            ${k(`${r.chargesCompleted}`, `batteries charged to ${Math.round(P.targetSoc * 100)} %`)}
+            ${k(`${r.infeasible}`, 'orders with no battery-feasible route')}
           </div>
           <h4>Over time</h4>${fleetChart(r.series)}
-          <h4>By pier</h4><table class="tbl"><tr><th>Pier</th><th>Orders</th><th>Served</th><th>Still waiting</th><th>Mean wait min</th><th>UAVs here at end</th></tr>${pierRows}</table>
-          <h4>By UAV</h4><table class="tbl"><tr><th>UAV</th><th>Home</th><th>Now at</th><th>Deliveries</th><th>Empty flights</th><th>kWh used</th><th>Charge at end</th><th>Flying</th><th>Charging</th></tr>${uavRows}</table>
-          <p class="muted">${P.n} UAVs per pier · rebalancing ${P.strat}${P.strat === 'proactive' ? ' (target ' + P.tgt + ' ready / pier)' : ''} · ${P.rate} orders/min over the 24 cross-harbour pairs · ${T} min · battery ${P.bat} Wh · Matrice 4E ${(P.chg * 1000).toFixed(0)} W hub profile (${P.charge90Min} min to 90 %, ${P.chargeFullMin} min to full) · seed ${P.seed} · current wind field · 4D booking and take-off column rule as in the live twin.</p>`;
+          <h4>By pier</h4><table class="tbl"><tr><th>Pier</th><th>Orders</th><th>Delivered</th><th>Still waiting</th><th>Mean wait min</th><th>UAVs here at end</th></tr>${pierRows}</table>
+          <h4>By UAV</h4><table class="tbl"><tr><th>UAV</th><th>Home</th><th>Now at</th><th>Trips booked</th><th>Empty flights</th><th>kWh used</th><th>Installed charge</th><th>Flying</th><th>Awaiting battery</th><th>Swaps</th></tr>${uavRows}</table>
+          <p class="muted">${P.n} UAVs per pier · ${P.payloadKg * 1000} g parcel + attachment · rebalancing ${P.strat}${P.strat === 'proactive' ? ' (target ' + P.tgt + ' ready / pier)' : ''} · ${P.rate} orders/min over 24 cross-harbour pairs · ${T} min · ${P.bat} Wh/battery · ${P.spares} spare batteries, ${P.hubs} × ${(P.chg * 1000).toFixed(0)} W hubs per pier (one battery per hub) · charge target ${P.targetSoc * 100} % · swap ${P.swapSec} s · seed ${P.seed} · current wind field · 4D booking. Delivered means touchdown by the end of the run; unavailable routes are counted separately.</p>`;
         fleetPierView(r.snaps.length - 1);
-        addLog(`Fleet model: ${r.served.length}/${r.orders.length} orders served, mean wait ${(r.meanWait / 60).toFixed(1)} min`, 'ok');
+        addLog(`Fleet model: ${r.served.length}/${r.orders.length} orders delivered, mean wait ${(r.meanWait / 60).toFixed(1)} min`, 'ok');
     }, 30);
 }
 function runFleetSweep() {
@@ -1856,8 +1950,8 @@ function runFleetSweep() {
                 return `<td class="fl-sw"${r.served.length === best ? ' style="color:#4ade80"' : ''}>${pc.toFixed(0)} %</td><td>${(r.meanWait / 60).toFixed(1)}</td><td>${r.repos}</td>`; }).join('')}</tr>`);
         }
         out.innerHTML = `<h4>Fleet-size sweep · three rebalancing strategies</h4><table class="tbl"><tr><th rowspan="2">UAVs / pier</th><th rowspan="2">Fleet</th><th colspan="3">None</th><th colspan="3">Reactive</th><th colspan="3">Proactive (target ${base.tgt})</th></tr>
-            <tr>${S.map(() => '<th class="fl-sw">Served</th><th>Wait min</th><th>Empty</th>').join('')}</tr>${rows.join('')}</table>
-            <p class="muted">Served = orders that took off within ${base.dur} min (green = best of the three). Wait = mean time from order to take-off, including the 4D slot delay. Empty = repositioning flights without cargo — the price paid for the shorter wait. ${base.rate} orders/min · battery ${base.bat} Wh · Matrice 4E ${(base.chg * 1000).toFixed(0)} W hub profile (${base.charge90Min} min to 90 %, ${base.chargeFullMin} min to full) · seed ${base.seed}.</p>`;
+            <tr>${S.map(() => '<th class="fl-sw">Delivered</th><th>Wait min</th><th>Empty</th>').join('')}</tr>${rows.join('')}</table>
+            <p class="muted">Delivered = orders that touched down within ${base.dur} min (green = best of three). Wait = mean order-to-take-off time for delivered orders. Empty = repositioning flights without cargo. Same seeded demand and wind for each run. ${base.rate} orders/min · ${base.payloadKg * 1000} g parcels · ${base.bat} Wh/battery · ${base.spares} spare batteries, ${base.hubs} hubs per pier · ${base.targetSoc * 100} % charge target · ${base.swapSec} s swap · seed ${base.seed}.</p>`;
         addLog('Fleet-size sweep complete', 'ok');
     }, 30);
 }
@@ -1872,12 +1966,13 @@ function batchRun(ratePerMin, strategic, N = 300, seed = 2026) {
         const key = od.from + od.to;
         if (!(key in cache)) cache[key] = aStar(od.from, od.to, {});
         const plan = cache[key];
-        if (!plan) continue;
+        if (!plan || !plan.feasibleBattery) continue;
         let delay = 0, tl;
         if (strategic) { const s = scheduleDeparture(plan, t, res, 3600); if (!s) continue; delay = s.delay; tl = s.tl; reserve(tl, od.to, k, res); }
         else tl = timeline(plan, t);
         flights.push({ plan, tReq: t, tDep: t + delay, delay, tl, dest: od.to });
     }
+    if (!flights.length) return { n: 0, los: 0, losPer100: 0, meanDelay: 0, p95Delay: 0, holdEvents: 0, meanHold: 0, meanTrip: 0 };
     // Pads: FIFO, one slot per pier
     let holdEvents = 0, holdTotal = 0;
     const byPad = {};
@@ -1975,7 +2070,7 @@ function networkAlternatives() {
     ].map(([name, corr]) => ({ name, ...networkStats(corr) }));
 }
 function showBatch() {
-    showInfo('Batch evaluation', `<p class="note">300 Poisson flights per demand level over the ${OD_COUNT} cross-harbour OD pairs, seed 2026, current wind field, with strategic 4D slots OFF and ON. Takes a few seconds.</p>
+    showInfo('Batch evaluation', `<p class="note">300 Poisson flight requests per demand level over the ${OD_COUNT} cross-harbour OD pairs, seed 2026, current wind field, with strategic 4D slots OFF and ON. Routes that violate wind or the Matrice 4E battery reserve are excluded and the flown count is shown. Takes a few seconds.</p>
         <button class="btn" style="justify-content:center" onclick="runBatch()">Run again</button><div id="batchOut"></div>`, CARD_WIDTH, 'main');
     runBatch();
 }
@@ -1986,12 +2081,12 @@ function runBatch() {
         const rows = [];
         [2, 4, 6].forEach(r => {
             const a = batchRun(r, false), b = batchRun(r, true);
-            rows.push(`<tr><td rowspan="2">${r}/min</td><td>OFF</td><td>${a.los}</td><td>${a.losPer100.toFixed(1)}</td><td>${a.holdEvents}</td><td>${a.meanHold.toFixed(1)}</td><td>${a.meanDelay.toFixed(1)}</td><td>${(a.meanTrip / 60).toFixed(2)}</td></tr>`);
-            rows.push(`<tr><td>ON</td><td>${b.los}</td><td>${b.losPer100.toFixed(1)}</td><td>${b.holdEvents}</td><td>${b.meanHold.toFixed(1)}</td><td>${b.meanDelay.toFixed(1)}</td><td>${(b.meanTrip / 60).toFixed(2)}</td></tr>`);
+            rows.push(`<tr><td rowspan="2">${r}/min</td><td>OFF</td><td>${a.n}</td><td>${a.los}</td><td>${a.losPer100.toFixed(1)}</td><td>${a.holdEvents}</td><td>${a.meanHold.toFixed(1)}</td><td>${a.meanDelay.toFixed(1)}</td><td>${(a.meanTrip / 60).toFixed(2)}</td></tr>`);
+            rows.push(`<tr><td>ON</td><td>${b.n}</td><td>${b.los}</td><td>${b.losPer100.toFixed(1)}</td><td>${b.holdEvents}</td><td>${b.meanHold.toFixed(1)}</td><td>${b.meanDelay.toFixed(1)}</td><td>${(b.meanTrip / 60).toFixed(2)}</td></tr>`);
         });
         window.lastBatch = rows;
-        out.innerHTML = `<table class="tbl"><tr><th>Demand</th><th>4D slots</th><th>LoS pairs</th><th>/100 flt</th><th>Pad holds</th><th>Hold s/flt</th><th>Ground delay s</th><th>Trip min</th></tr>${rows.join('')}</table>
-            <p class="note">Poisson demand over ${OD_COUNT} directional cross-harbour OD pairs only, seed 2026, current wind field. LoS = horizontal &lt; 80 m and vertical &lt; ${VERTICAL_SEPARATION} m before tactical resolution; holding = FIFO wait at a busy pad.</p>`;
+        out.innerHTML = `<table class="tbl"><tr><th>Demand</th><th>4D slots</th><th>Flown / 300</th><th>LoS pairs</th><th>/100 flt</th><th>Pad holds</th><th>Hold s/flt</th><th>Ground delay s</th><th>Trip min</th></tr>${rows.join('')}</table>
+            <p class="note">Poisson demand over ${OD_COUNT} directional cross-harbour OD pairs only, seed 2026, current wind field. Flown counts include battery-feasible routes with an available slot. LoS = horizontal &lt; 80 m and vertical &lt; ${VERTICAL_SEPARATION} m before tactical resolution; holding = FIFO wait at a busy pad.</p>`;
         addLog('Batch conflict evaluation complete', 'ok');
     }, 30);
 }
@@ -2087,10 +2182,10 @@ const HUD_TIPS = {
     temp: 'Air temperature at 60 / 90 / 110 m from the ISA lapse rate (−6.5 °C per km); used for air density and power',
 };
 const EMG_THRESH = [
-    ['Battery SOC ≤ 25%', 'State of charge = remaining battery energy ÷ 950 Wh. At 25% the UAV can no longer guarantee the normal 20% landing reserve after finishing its mission, so it diverts. Emergency landings may use the battery down to 10%.'],
-    ['Motor health < 65%', 'Health index of the propulsion system (1 = nominal). Below 0.65 the remaining thrust margin is treated as insufficient for continued cruise.'],
-    ['C2 link lost ≥ 10 s', 'Command-and-control (C2) radio link between UAV and operator. A loss of 10 s or longer triggers the contingency procedure.'],
-    ['Detected gust > 20 m/s', 'Gust measured or estimated on the current leg exceeds the airframe gust limit of 20 m/s.'],
+    ['Battery SOC ≤ 25%', 'Study threshold: state of charge = remaining energy ÷ 99.5 Wh. Normal flight planning keeps a 20% reserve; an emergency landing may use the battery down to 10%.'],
+    ['Motor health < 65%', 'Study threshold: propulsion health index (1 = nominal). Below 0.65 the model initiates diversion; this is not a DJI maintenance limit.'],
+    ['C2 link lost ≥ 10 s', 'Study threshold: a command-and-control link loss lasting 10 s or longer triggers the contingency procedure.'],
+    ['Detected gust > 20 m/s', 'Study scenario threshold: estimated gust over 20 m/s triggers diversion. DJI specifies 12 m/s maximum wind resistance during takeoff and landing, not a 20 m/s airframe gust rating.'],
 ];
 const GUIDE = [
     ['about', 'About this module', () => `
@@ -2126,7 +2221,8 @@ const GUIDE = [
         <p class="note">On the 2D map the two cruise directions are drawn with a small sideways offset; all calculations use the real altitudes.</p>`],
     ['routing', 'Routing model', () => `
         <h5>Objective</h5>A* minimises total time Σ[d / v<sub>g</sub> + W<sub>q</sub>] over the corridor network: d = link length, v<sub>g</sub> = ground speed from the wind triangle at the link's layer, W<sub>q</sub> = queueing delay (M/M/1) from traffic on the link.
-        <h5>Constraints</h5>Mean wind ≤ ${UAV.maxWind} m/s, gust ≤ ${UAV.maxGust} m/s, crosswind below airspeed, link capacity, 20% battery reserve. No U-turns.
+        <h5>Aircraft and energy</h5>DJI Matrice 4E: 1.219 kg standard takeoff weight, 1.420 kg maximum takeoff weight, 99.5 Wh battery, 200 g maximum payload. The demo uses a 100 g parcel + attachment and 15 m/s cruise. Estimated power is fitted to DJI's no-load, no-wind 42 min hover, 49 min flight near 9 m/s and 35 km at about 14 m/s; payload and air-density corrections are study assumptions, not measured DJI power curves.
+        <h5>Constraints</h5>The 12 m/s mean-wind closure is a conservative study rule based on DJI's takeoff/landing wind-resistance figure; the 20 m/s gust trigger is a separate study scenario. Crosswind must be below airspeed, links must have capacity, and each mission needs a 20% study battery reserve. No U-turns.
         <h5>Why routes are not straight lines</h5>UAVs may only fly the published corridor links (mainly along ferry routes and the coast, plus two direct crossings). A free straight line would cut across other corridors and restricted zones; linking every pier pair directly would create 18 crossings instead of 0. Plan (A*) shows, for the chosen pair, the straight-line distance, the extra distance, which corridors a direct line would cross, and the alternative corridor routes.
         <h5>Strategic 4D deconfliction (always on)</h5>Before take-off each flight books its junction times, landing-pad window and whole 4D trajectory, and its climb may not overlap another UAV's landing descent at the same pier (one pad per pier); if anything clashes it waits on the pier. That wait is the "delay" in the status bar.`],
     ['emergency', 'Emergency thresholds', () => `

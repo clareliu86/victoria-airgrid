@@ -55,11 +55,18 @@ Line numbers are approximate and will shift as the code is edited.
 |---|---|---|
 | `LEVEL_ALT` | A 90 m, B 110 m, E 60 m | Cruise and emergency layer heights |
 | `VERTICAL_SEPARATION` | 15 m | Vertical buffer used in 4D booking |
-| `UAV.battery_Wh` | 950 Wh | Battery pack, used by the energy model and fleet model |
+| `UAV.mass` / `UAV.battery_Wh` | 1.219 kg / 99.5 Wh | DJI Matrice 4E standard takeoff weight and battery energy |
+| `UAV.maxPayloadKg` / `UAV.payloadKg` | 0.200 kg / 0.100 kg | DJI maximum payload / study parcel plus attachment |
+| UAV cruise, climb, descent | 15 / 3 / 2 m/s | Study speeds, below DJI maxima of 21 / 10 / 8 m/s |
+| `UAV.maxWind`, `UAV.maxGust` | 12 / 20 m/s | Conservative study closure / emergency scenario; DJI's 12 m/s rating applies to takeoff and landing |
 | `UNLOAD_S` | 30 s | Time on the pad after touchdown |
 | `DEP_PAD_MODE` | `'vertical'` | Take-off climb and landing descent at the same pier are separated in time |
 | `EMG_RETRY_S` | 5 s | Re-check interval when no emergency diversion is feasible yet |
-| Fleet model | Matrice 4E 100 W hub profile: 60 min to 90 %, 78 min to full; 120 min, seed 2026, 20 % reserve | Fixed assumptions of the fleet panel; charging time is calibrated independently of the existing 950 Wh flight-energy scale |
+| Fleet model | 2 spare batteries, 1 sequential 100 W hub, 60 s swap per pier; 90 % charge target | Adjustable study assumptions; DJI quotes 60 min to 90 %, 78 min to full for one battery |
+
+The flight-power estimate is a research interpolation of DJI's no-payload, no-wind endurance points: 42 min hover, 49 min at about 9 m/s, and 35 km at about 14 m/s. The payload, altitude-density and swap models are assumptions, not manufacturer power curves or field measurements. The live traffic view dispatches a fresh aircraft per order; the Fleet tab simulates finite aircraft and physical batteries. A battery is removed after landing, queued at a pier, charged by a hub one at a time, and installed after the specified swap time. The 0–90 % and 90–100 % charging slopes interpolate DJI's quoted times. Orders whose route exceeds the 20 % reserve are counted as infeasible.
+
+Aircraft and battery specifications: [DJI Matrice 4 Series specifications](https://enterprise.dji.com/matrice-4-series/specs). Charging times, battery-only charging and sequential hub operation: [DJI FAQ](https://enterprise.dji.com/matrice-4-series/faq).
 
 ## External data sources
 
